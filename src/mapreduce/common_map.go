@@ -1,7 +1,10 @@
 package mapreduce
 
 import (
+	"bytes"
 	"hash/fnv"
+	"io/ioutil"
+	"log"
 )
 
 func doMap(
@@ -53,6 +56,19 @@ func doMap(
 	//
 	// Your code here (Part I).
 	//
+	contents, err := ioutil.ReadFile(inFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	noOfBytesRead := bytes.IndexByte(contents, 0)
+	keyValues := mapF(inFile, string(contents[:noOfBytesRead]))
+
+	// TODOs:
+	// Create nReduce intermediate files
+	// Name these files using the `reduceName()`
+	// Use the ihash() to save keyvalue to intermediate files
+	// Use a JSON format when writing into the files. ^^^ see above comments
+	// Close the input file and intermediate files.
 }
 
 func ihash(s string) int {
