@@ -2,9 +2,11 @@ package mapreduce
 
 import (
 	"bytes"
+	"encoding/json"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
+	"os"
 )
 
 func doMap(
@@ -56,12 +58,6 @@ func doMap(
 	//
 	// Your code here (Part I).
 	//
-	contents, err := ioutil.ReadFile(inFile)
-	if err != nil {
-		log.Fatal(err)
-	}
-	noOfBytesRead := bytes.IndexByte(contents, 0)
-	keyValues := mapF(inFile, string(contents[:noOfBytesRead]))
 
 	// TODOs:
 	// Create nReduce intermediate files
@@ -69,6 +65,40 @@ func doMap(
 	// Use the ihash() to save keyvalue to intermediate files
 	// Use a JSON format when writing into the files. ^^^ see above comments
 	// Close the input file and intermediate files.
+
+	contents, err := ioutil.ReadFile(inFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	noOfBytesRead := bytes.IndexByte(contents, 0)
+	keyValues := mapF(inFile, string(contents[:noOfBytesRead]))
+
+	// Creating intermediate files for reduce task
+	reduceTaskToFileDescriptorMap := make(map[int]*os.File)
+	for i := 0; i < nReduce; i++ {
+		fd, error := os.Create(reduceName(jobName, mapTask, i))
+		if error != nil {
+			log.Fatal(error)
+		}
+		reduceTaskToFileDescriptorMap[i] = fd
+	}
+
+	reduceTaskToKeyValuesMap := make(map[int][]KeyValue)
+	for _, i := range keyValues {
+		reduceTaskToKeyValuesMap[ihash(i.Key)] = append(reduceTaskToKeyValuesMap[ihash(i.Key)], i)
+	}
+
+	for reduceTask, keyValueList := range reduceTaskToKeyValuesMap {
+		fileDescriptorForReduceTask := reduceTaskToFileDescriptorMap[reduceTask]
+		for _, keyValue := range keyValueList {
+			enc := json.NewEncoder(fileDescriptorForReduceTask)
+			err := enc.Encode(&keyValue)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		fileDescriptorForReduceTask.Close()
+	}
 }
 
 func ihash(s string) int {
