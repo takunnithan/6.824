@@ -1,5 +1,14 @@
 package mapreduce
 
+import (
+	"bytes"
+	"encoding/json"
+	"io/ioutil"
+	"log"
+	"os"
+	"strings"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -44,4 +53,44 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+
+	// Read the input file
+	//		- Decode the input file
+	//		- Sort & Combine keys
+	data := make(map[string][]string)
+	for i := 0; i < nMap; i++ {
+		inputFileName := reduceName(jobName, i, reduceTask)
+		contents, err := ioutil.ReadFile(inputFileName)
+		if err != nil {
+			log.Fatal(err)
+		}
+		noOfBytesRead := bytes.IndexByte(contents, 0)
+		// decoder := json.NewDecoder(bytes.NewReader(contents[:noOfBytesRead]))
+		decoder := json.NewDecoder(strings.NewReader(string((contents[:noOfBytesRead]))))
+		for decoder.More() {
+			var kv KeyValue
+			err := decoder.Decode(&kv)
+			if err != nil {
+				log.Fatal(err)
+			}
+			data[kv.Key] = append(data[kv.Key], kv.Value)
+		}
+	}
+
+	// Call User defined ReduceF() for each key with slice of
+	// Write the output to output file
+	//		- Encode the output in json
+
+	reducedValue := make(map[string]string)
+	fd, error := os.Create(outFile)
+	if error != nil {
+		log.Fatal(error)
+	}
+	enc := json.NewEncoder(fd)
+	for key, values := range data {
+		reducedValue[key] = reduceF(key, values)
+		enc.Encode(KeyValue{key, reduceF(key, values)})
+	}
+
+	fd.Close()
 }
