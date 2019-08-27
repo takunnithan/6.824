@@ -1,7 +1,6 @@
 package mapreduce
 
 import (
-	"bytes"
 	"encoding/json"
 	"io/ioutil"
 	"log"
@@ -54,9 +53,6 @@ func doReduce(
 	// Your code here (Part I).
 	//
 
-	// Read the input file
-	//		- Decode the input file
-	//		- Sort & Combine keys
 	data := make(map[string][]string)
 	for i := 0; i < nMap; i++ {
 		inputFileName := reduceName(jobName, i, reduceTask)
@@ -64,9 +60,8 @@ func doReduce(
 		if err != nil {
 			log.Fatal(err)
 		}
-		noOfBytesRead := bytes.IndexByte(contents, 0)
-		// decoder := json.NewDecoder(bytes.NewReader(contents[:noOfBytesRead]))
-		decoder := json.NewDecoder(strings.NewReader(string((contents[:noOfBytesRead]))))
+
+		decoder := json.NewDecoder(strings.NewReader(string((contents))))
 		for decoder.More() {
 			var kv KeyValue
 			err := decoder.Decode(&kv)
@@ -76,10 +71,6 @@ func doReduce(
 			data[kv.Key] = append(data[kv.Key], kv.Value)
 		}
 	}
-
-	// Call User defined ReduceF() for each key with slice of
-	// Write the output to output file
-	//		- Encode the output in json
 
 	reducedValue := make(map[string]string)
 	fd, error := os.Create(outFile)
