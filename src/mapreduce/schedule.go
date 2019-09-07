@@ -14,6 +14,13 @@ import (
 // suitable for passing to call(). registerChan will yield all
 // existing registered workers (if any) and new ones as they register.
 //
+
+
+
+//TODO:
+//	1) Adding workers back to the channel once they are free
+//	2) Shutdown reply has some issue
+
 func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, registerChan chan string) {
 	var ntasks int
 	var n_other int // number of inputs (for reduce) or outputs (for map)
@@ -24,16 +31,19 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	switch phase {
 	case mapPhase:
 		var wg sync.WaitGroup
-		wg.Add(ntasks)
 		ntasks = len(mapFiles)
 		n_other = nReduce
-		for rpcAddress := range registerChan {
-			for i := 0; i < ntasks; i++ {
+		wg.Add(ntasks)
+
+		for i := 0; i < ntasks; i++ {
+			for rpcAddress := range registerChan {
+				fmt.Println("Worker Address:", rpcAddress)
 				go func(taskNumber int) {
 					taskArgs := DoTaskArgs{jobName, mapFiles[taskNumber], phase, taskNumber, n_other}
-					call(rpcAddress, "DoTask", taskArgs, response)
+					call(rpcAddress, "Worker.DoTask", taskArgs, response)
 					wg.Done()
 				}(i)
+				break
 			}
 		}
 		wg.Wait()
@@ -41,8 +51,21 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	case reducePhase:
 		ntasks = nReduce
 		n_other = len(mapFiles)
+		var wg sync.WaitGroup
+		wg.Add(ntasks)
+		for i := 0; i < ntasks; i++ {
+			for rpcAddress := range registerChan {
+				go func(taskNumber int) {
+					taskArgs := DoTaskArgs{jobName, mapFiles[taskNumber], phase, taskNumber, n_other}
+					call(rpcAddress, "Worker.DoTask", taskArgs, response)
+					wg.Done()
+				}(i)
+				break
+			}
+		}
+		wg.Wait()
+		return
 	}
-
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, n_other)
 
 	// All ntasks tasks have to be scheduled on workers. Once all tasks
