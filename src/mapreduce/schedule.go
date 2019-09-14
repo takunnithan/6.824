@@ -43,14 +43,24 @@ func distributeTasks(ntasks int, registerChan chan string, jobName string,
 	mapFiles []string, phase jobPhase, n_other int, response *Response) chan string {
 	var wg sync.WaitGroup
 	wg.Add(ntasks)
+	var tasks []int
 	for i := 0; i < ntasks; i++ {
+		tasks = append(tasks, i)
+	}
+	for i := 0; i < len(tasks); i++ {
 		for rpcAddress := range registerChan {
 			go func(taskNumber int) {
 				taskArgs := DoTaskArgs{jobName, mapFiles[taskNumber], phase, taskNumber, n_other}
-				call(rpcAddress, "Worker.DoTask", taskArgs, response)
+				result := call(rpcAddress, "Worker.DoTask", taskArgs, response)
 				wg.Done()
-				registerChan <- rpcAddress
-			}(i)
+				if result == true {
+					registerChan <- rpcAddress
+				} else {
+					tasks = append(tasks, taskNumber)
+					wg.Add(1)
+				}
+
+			}(tasks[i])
 			break
 		}
 	}
