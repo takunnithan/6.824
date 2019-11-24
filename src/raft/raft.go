@@ -20,6 +20,7 @@ package raft
 import (
 	"labrpc"
 	"sync"
+	"time"
 )
 
 // import "bytes"
@@ -55,6 +56,12 @@ type Raft struct {
 	persister  *Persister          // Object to hold this peer's persisted state
 	me         int                 // this peer's index into peers[]
 	LogEntries []LogEntry          // To store log entries
+	ElectionTimeOut int
+	Term	int 				   // Current term of the server
+	LastLogIndex int
+	LastLogTerm int
+
+
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -227,15 +234,60 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.ElectionTimeOut = GetRandomElectionTimeout()
+
 
 	// Your initialization code here (2A, 2B, 2C).
+
+
+	//   All Goroutines must be run in background indefinitely
+
+
+
+	go ElectionTimerCounter()
 
 	// TODO: A goroutine to check the heartbeat messages from leader
 		// If the timer times out -> send sendRequestVote call to other raft servers.
 		// Need to decide the election timeout
+	go func (rf *Raft) () {
+
+		if (rf.ElectionTimeOut >= 0) {
+			requestArgs := RequestVoteArgs{
+				Term: rf.Term
+				CandidateID: rf.CandidateID
+				LastLogIndex: rf.LastLogIndex
+				LastLogTerm: rf.LastLogTerm
+			}
+			var reply RequestVoteReply
+			for i := 0; i < len(rf.persist) -1 ; i++ {
+				rf.sendRequestVote(i, requestArgs, reply)
+		}
+
+	}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	return rf
+}
+
+
+type AppendEntries struct {
+	HeartBeat = true
+}
+
+func (rf *Raft) sendHeartBeat(heartBeat *AppendEntries) {
+	// Check if reply is needed for the RPC?
+	rf.peers[server].Call("Raft.HandleHeartBeat", heartBeat)
+}
+
+func (rf *Raft) HandleHeartBeat(heartBeat *AppendEntries) {
+	rf.ElectionTimeOut = GetRandomElectionTimeout()
+}
+
+
+// Run this function as go routine indefinetly
+func (rf * Raft) ElectionTimerCounter() {
+	time.Sleep(100 * time.Millisecond)
+	rf.ElectionTimeOut = rf.ElectionTimeOut - 100
 }
