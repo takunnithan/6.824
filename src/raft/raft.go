@@ -51,17 +51,16 @@ type LogEntry struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu         sync.Mutex          // Lock to protect shared access to this peer's state
-	peers      []*labrpc.ClientEnd // RPC end points of all peers
-	persister  *Persister          // Object to hold this peer's persisted state
-	me         int                 // this peer's index into peers[]
-	LogEntries []LogEntry          // To store log entries
+	mu              sync.Mutex          // Lock to protect shared access to this peer's state
+	peers           []*labrpc.ClientEnd // RPC end points of all peers
+	persister       *Persister          // Object to hold this peer's persisted state
+	me              int                 // this peer's index into peers[]
+	LogEntries      []LogEntry          // To store log entries
 	ElectionTimeOut int
-	Term	int 				   // Current term of the server
-	LastLogIndex int
-	LastLogTerm int
-
-
+	Term            int // Current term of the server
+	LastLogIndex    int
+	LastLogTerm     int
+	IsLeader        bool
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -147,6 +146,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// TODO: Write the Handler code here.
 	// Check the term, who is the current leader, etc -> Refer Raft paper
 	// Send the reply struct.
+	// For now -> if election timer is not timed out - send NO! & current Term
+
+	if args.Term > rf.Term {
+		if rf.ElectionTimeOut <= 0 {
+			reply.Term = rf.Term
+			reply.VoteGranted = true
+		}
+	}
+	reply.Term = rf.Term
+	reply.VoteGranted = false
 }
 
 //
@@ -179,8 +188,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+	// Don't send the rpc to yourself
+	if rf.peers[server] != rf.peers[rf.me] {
+		// ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		// return ok
+		rf.peers[server].Call("Raft.RequestVote", args, reply)
+	}
+	return true
 }
 
 //
@@ -236,34 +250,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.ElectionTimeOut = GetRandomElectionTimeout()
 
-
 	// Your initialization code here (2A, 2B, 2C).
-
 
 	//   All Goroutines must be run in background indefinitely
 
+	go rf.ElectionTimerCounter()
 
-
-	go ElectionTimerCounter()
+	go rf.sendHeartBeat()
 
 	// TODO: A goroutine to check the heartbeat messages from leader
-		// If the timer times out -> send sendRequestVote call to other raft servers.
-		// Need to decide the election timeout
-	go func (rf *Raft) () {
-
-		if (rf.ElectionTimeOut >= 0) {
-			requestArgs := RequestVoteArgs{
-				Term: rf.Term
-				CandidateID: rf.CandidateID
-				LastLogIndex: rf.LastLogIndex
-				LastLogTerm: rf.LastLogTerm
-			}
-			var reply RequestVoteReply
-			for i := 0; i < len(rf.persist) -1 ; i++ {
-				rf.sendRequestVote(i, requestArgs, reply)
-		}
-
-	}
+	// If the timer times out -> send sendRequestVote call to other raft servers.
+	// Need to decide the election timeout
+	go rf.ElectLeader()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -271,23 +269,72 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-
 type AppendEntries struct {
-	HeartBeat = true
+	HeartBeat bool
 }
 
-func (rf *Raft) sendHeartBeat(heartBeat *AppendEntries) {
-	// Check if reply is needed for the RPC?
-	rf.peers[server].Call("Raft.HandleHeartBeat", heartBeat)
+type HeartBeatReply struct {
+	IamAlive bool
 }
 
-func (rf *Raft) HandleHeartBeat(heartBeat *AppendEntries) {
+func (rf *Raft) sendHeartBeat() {
+	heartBeat := &AppendEntries{}
+	heartBeat.HeartBeat = true
+	heartBeatReply := &HeartBeatReply{}
+	for {
+		if rf.IsLeader {
+			for i := 0; i < len(rf.peers)-1; i++ {
+				if rf.peers[i] != rf.peers[rf.me] {
+					rf.peers[i].Call("Raft.HandleHeartBeat", heartBeat, heartBeatReply)
+				}
+			}
+		}
+	}
+}
+
+func (rf *Raft) HandleHeartBeat(heartBeat *AppendEntries, heartBeatReply *HeartBeatReply) {
 	rf.ElectionTimeOut = GetRandomElectionTimeout()
 }
 
-
 // Run this function as go routine indefinetly
-func (rf * Raft) ElectionTimerCounter() {
-	time.Sleep(100 * time.Millisecond)
-	rf.ElectionTimeOut = rf.ElectionTimeOut - 100
+func (rf *Raft) ElectionTimerCounter() {
+	for {
+		time.Sleep(100 * time.Millisecond)
+		// Don't timeout if it is the leader
+		if !rf.IsLeader {
+			rf.ElectionTimeOut = rf.ElectionTimeOut - 100
+		}
+	}
+}
+
+func (rf *Raft) ElectLeader() {
+
+	for {
+
+		// Not voting for itself now.
+		votes := 0
+
+		if rf.ElectionTimeOut <= 0 {
+			requestArgs := &RequestVoteArgs{
+				Term:         rf.Term,
+				CandidateID:  rf.me,
+				LastLogIndex: rf.LastLogIndex,
+				LastLogTerm:  rf.LastLogTerm,
+			}
+
+			for i := 0; i < len(rf.peers)-1; i++ {
+				reply := &RequestVoteReply{}
+				rf.sendRequestVote(i, requestArgs, reply)
+				if reply.VoteGranted {
+					votes = votes + 1
+				}
+			}
+			if votes >= GetMajority(len(rf.peers)-1) {
+				rf.IsLeader = true
+				rf.Term = rf.Term + 1
+			}
+
+		}
+	}
+
 }
