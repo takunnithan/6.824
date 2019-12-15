@@ -310,6 +310,8 @@ func (rf *Raft) HandleHeartBeat(heartBeat *AppendEntries, heartBeatReply *HeartB
 	timeout := GetRandomElectionTimeout()
 	rf.ElectionTimeOut = timeout
 	rf.Term = heartBeat.Term
+	// If a Leader receives a heartbeat --> That means its not a leader anymore
+	rf.IsLeader = false
 	fmt.Println(rf.me, timeout, heartBeat.Sender)
 	// heartBeatReply.IamAlive = true
 }
@@ -331,6 +333,7 @@ func (rf *Raft) ElectLeader() {
 		if rf.ElectionTimeOut <= 0 && !rf.IsLeader {
 			votes := 0
 			majority := GetMajority(len(rf.peers) - 1)
+			fmt.Println("majority:", majority, rf.me)
 			requestArgs := &RequestVoteArgs{
 				Term:         rf.Term,
 				CandidateID:  rf.me,
@@ -352,6 +355,7 @@ func (rf *Raft) ElectLeader() {
 				rf.IsLeader = true
 				rf.Term = rf.Term + 1
 				rf.ImmediateHeartBeat()
+				rf.ElectionTimeOut = GetRandomElectionTimeout()
 			}
 
 		}
