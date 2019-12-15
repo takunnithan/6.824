@@ -72,10 +72,6 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	//var term int
-	//var isleader bool
-	// Your code here (2A).
 	return rf.Term, rf.IsLeader
 }
 
@@ -149,15 +145,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Send the reply struct.
 	// For now -> if election timer is not timed out - send NO! & current Term
 	if args.Term >= rf.Term {
-		// if rf.ElectionTimeOut <= 0 && !rf.IsLeader {
-		// 	reply.Term = rf.Term
-		// 	reply.VoteGranted = true
-		// }
 		reply.Term = rf.Term
 		reply.VoteGranted = true
+	} else {
+		reply.Term = rf.Term
+		reply.VoteGranted = false
 	}
-	reply.Term = rf.Term
-	reply.VoteGranted = false
 }
 
 //
@@ -191,6 +184,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	// Don't send the rpc to yourself
+	// fmt.Println(server, len(rf.peers))
 	if rf.peers[server] != rf.peers[rf.me] {
 		// ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 		// return ok
@@ -259,12 +253,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//   All Goroutines must be run in background indefinitely
 	go rf.ElectionTimerCounter()
 
-	go rf.sendHeartBeat()
-
 	// TODO: A goroutine to check the heartbeat messages from leader
 	// If the timer times out -> send sendRequestVote call to other raft servers.
 	// Need to decide the election timeout
 	go rf.ElectLeader()
+
+	go rf.sendHeartBeat()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -274,53 +268,67 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 type AppendEntries struct {
 	HeartBeat bool
+	Term      int
+	Sender    int
 }
 
 type HeartBeatReply struct {
 	IamAlive bool
 }
 
+func (rf *Raft) ImmediateHeartBeat() {
+	heartBeat := &AppendEntries{HeartBeat: true, Sender: rf.me, Term: rf.Term}
+	heartBeatReply := &HeartBeatReply{}
+	for i := 0; i <= (len(rf.peers) - 1); i++ {
+		if rf.peers[i] != rf.peers[rf.me] {
+			rf.peers[i].Call("Raft.HandleHeartBeat", heartBeat, heartBeatReply)
+		}
+	}
+}
+
 func (rf *Raft) sendHeartBeat() {
 	heartBeat := &AppendEntries{}
 	heartBeat.HeartBeat = true
+	heartBeat.Sender = rf.me
 	heartBeatReply := &HeartBeatReply{}
 	for {
 		if rf.IsLeader {
-			for i := 0; i < len(rf.peers)-1; i++ {
+			heartBeat.Term = rf.Term
+			for i := 0; i <= (len(rf.peers) - 1); i++ {
 				if rf.peers[i] != rf.peers[rf.me] {
 					rf.peers[i].Call("Raft.HandleHeartBeat", heartBeat, heartBeatReply)
 				}
 			}
+
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
 func (rf *Raft) HandleHeartBeat(heartBeat *AppendEntries, heartBeatReply *HeartBeatReply) {
-	rf.ElectionTimeOut = GetRandomElectionTimeout()
+	// fmt.Println("Got heartbeat", rf.me, rf.Term, heartBeat.Term)
+	timeout := GetRandomElectionTimeout()
+	rf.ElectionTimeOut = timeout
+	rf.Term = heartBeat.Term
+	fmt.Println(rf.me, timeout, heartBeat.Sender)
+	// heartBeatReply.IamAlive = true
 }
 
 // Run this function as go routine indefinetly
 func (rf *Raft) ElectionTimerCounter() {
 	for {
-		//fmt.Println(rf.IsLeader, rf.me)
 		// Don't timeout if it is the leader
 		if !rf.IsLeader {
-			// fmt.Println(rf.me, rf.ElectionTimeOut)
-			rf.mu.Lock()
-			rf.ElectionTimeOut = rf.ElectionTimeOut - 30
-			rf.mu.Unlock()
+			rf.ElectionTimeOut = rf.ElectionTimeOut - 1
 		}
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 	}
 }
 
 func (rf *Raft) ElectLeader() {
 	for {
-		//fmt.Println(rf.ElectionTimeOut, rf.me)
 		// Not voting for itself now.
 		if rf.ElectionTimeOut <= 0 && !rf.IsLeader {
-			//fmt.Println("rf instance: ", rf.me)
 			votes := 0
 			majority := GetMajority(len(rf.peers) - 1)
 			requestArgs := &RequestVoteArgs{
@@ -329,25 +337,21 @@ func (rf *Raft) ElectLeader() {
 				LastLogIndex: rf.LastLogIndex,
 				LastLogTerm:  rf.LastLogTerm,
 			}
-
-			for i := 0; i < len(rf.peers)-1; i++ {
-				go func(vote *int) {
+			for i := 0; i <= (len(rf.peers) - 1); i++ {
+				go func(vote *int, server int) {
 					reply := &RequestVoteReply{}
-					rf.sendRequestVote(i, requestArgs, reply)
-					time.Sleep(20 * time.Millisecond)
-					fmt.Println(reply)
+					rf.sendRequestVote(server, requestArgs, reply)
+					// time.Sleep(3 * time.Millisecond)
 					if reply.VoteGranted {
-						// rf.mu.Lock()
 						*vote = *vote + 1
-						// rf.mu.Unlock()
 					}
-				}(&votes)
+				}(&votes, i)
 			}
-			time.Sleep(25 * time.Millisecond)
-			fmt.Println(rf.me, votes)
+			time.Sleep(1 * time.Millisecond)
 			if votes >= majority {
 				rf.IsLeader = true
 				rf.Term = rf.Term + 1
+				rf.ImmediateHeartBeat()
 			}
 
 		}

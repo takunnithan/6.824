@@ -19,7 +19,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 func GetRandomElectionTimeout() int {
 	rand.Seed(time.Now().UnixNano())
-	return rand.Intn(100) + 200
+	return rand.Intn(200) + 300
 
 }
 
