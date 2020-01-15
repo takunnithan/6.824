@@ -149,20 +149,27 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Check the term, who is the current leader, etc -> Refer Raft paper
 	// Send the reply struct.
 	// For now -> if election timer is not timed out - send NO! & current Term
+	fmt.Println("Recieved Vote Reques - me:", rf.me, "from:", args.CandidateID)
+	rf.mu.Lock()
 	_, voted := rf.VotedFor[args.Term]
-	if (args.Term >= rf.Term) && (!voted) {
+	currentTerm := rf.Term
+	rf.mu.Unlock()
+	if (args.Term >= currentTerm) && (!voted) {
 		rf.mu.Lock()
 		rf.IsLeader = false
 		rf.ElectionTimeOut = GetRandomElectionTimeout()
-		reply.Term = rf.Term
-		reply.VoteGranted = true
 		rf.Term = args.Term
 		rf.VotedFor[rf.Term] = args.CandidateID
 		rf.mu.Unlock()
+		reply.Term = rf.Term
+		reply.VoteGranted = true
 		fmt.Println(rf.me, " Voted for: ", args.CandidateID, "Term:", args.Term)
 	} else {
+		rf.mu.Lock()
 		reply.Term = rf.Term
+		rf.mu.Unlock()
 		reply.VoteGranted = false
+		fmt.Println("Vote rejected: me:", rf.me, "M-Term:", rf.Term, "Candidate:", args.CandidateID, "C-Term:", args.Term)
 	}
 }
 
@@ -201,6 +208,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	if rf.peers[server] != rf.peers[rf.me] {
 		// ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 		// return ok
+		fmt.Println("Requesting vote: FROM:", rf.me, "TO:", server)
 		rf.peers[server].Call("Raft.RequestVote", args, reply)
 	}
 	return true
@@ -286,34 +294,45 @@ type AppendEntries struct {
 	Sender    int
 }
 
-type HeartBeatReply struct {
-	IamAlive bool
+type AppendEntriesReply struct {
+	Term int
 }
 
 func (rf *Raft) ImmediateHeartBeat() {
 	heartBeat := &AppendEntries{HeartBeat: true, Sender: rf.me, Term: rf.Term}
-	heartBeatReply := &HeartBeatReply{}
 	for i := 0; i <= (len(rf.peers) - 1); i++ {
 		if rf.peers[i] != rf.peers[rf.me] {
-			rf.peers[i].Call("Raft.HandleHeartBeat", heartBeat, heartBeatReply)
+			go func(rf *Raft, server int, heartBeat *AppendEntries) {
+				heartBeatReply := &AppendEntriesReply{}
+				rf.peers[server].Call("Raft.AppendEntries", heartBeat, heartBeatReply)
+				time.Sleep(2 * time.Millisecond)
+				if heartBeatReply.Term > rf.Term {
+					rf.Term = heartBeatReply.Term
+					rf.IsLeader = false
+				}
+			}(rf, i, heartBeat)
 		}
 	}
 }
 
 func (rf *Raft) sendHeartBeat() {
-	heartBeat := &AppendEntries{}
-	heartBeat.HeartBeat = true
-	heartBeat.Sender = rf.me
-	heartBeatReply := &HeartBeatReply{}
 	for {
 		rf.mu.Lock()
-		heartBeat.Term = rf.Term
+		heartBeat := &AppendEntries{HeartBeat: true, Sender: rf.me, Term: rf.Term}
 		isLeader := rf.IsLeader
 		rf.mu.Unlock()
 		if isLeader {
 			for i := 0; i <= (len(rf.peers) - 1); i++ {
 				if rf.peers[i] != rf.peers[rf.me] {
-					rf.peers[i].Call("Raft.HandleHeartBeat", heartBeat, heartBeatReply)
+					go func(rf *Raft, server int, heartBeat *AppendEntries) {
+						heartBeatReply := &AppendEntriesReply{}
+						rf.peers[server].Call("Raft.AppendEntries", heartBeat, heartBeatReply)
+						time.Sleep(2 * time.Millisecond)
+						if heartBeatReply.Term > rf.Term {
+							rf.Term = heartBeatReply.Term
+							rf.IsLeader = false
+						}
+					}(rf, i, heartBeat)
 				}
 			}
 
@@ -322,19 +341,26 @@ func (rf *Raft) sendHeartBeat() {
 	}
 }
 
-func (rf *Raft) HandleHeartBeat(heartBeat *AppendEntries, heartBeatReply *HeartBeatReply) {
-	// If a Leader receives a heartbeat --> That means its not a leader anymore
-	rf.mu.Lock()
-	isNewHeartBeat := rf.Term <= heartBeat.Term
-	rf.mu.Unlock()
-	if isNewHeartBeat {
+func (rf *Raft) AppendEntries(appendEntries *AppendEntries, appendEntriesReply *AppendEntriesReply) {
+	// Handling HeartBeats
+	if appendEntries.HeartBeat {
+		// If a Leader receives a heartbeat --> That means its not a leader anymore
 		rf.mu.Lock()
-		rf.IsLeader = false
-		rf.ElectionTimeOut = GetRandomElectionTimeout()
-		fmt.Println("Heart Beat:", "receiver:", rf.me, "sender:", heartBeat.Sender, "rec_term", rf.Term, "send_term", heartBeat.Term)
-		rf.Term = heartBeat.Term
+		isNewTerm := rf.Term <= appendEntries.Term
 		rf.mu.Unlock()
-		// heartBeatReply.IamAlive = true
+		if isNewTerm {
+			rf.mu.Lock()
+			rf.IsLeader = false
+			rf.ElectionTimeOut = GetRandomElectionTimeout()
+			rf.Term = appendEntries.Term
+			rf.mu.Unlock()
+			fmt.Println("Heart Beat:", "receiver:", rf.me, "sender:", appendEntries.Sender, "rec_term", rf.Term, "send_term", appendEntries.Term)
+			appendEntriesReply.Term = appendEntries.Term
+		} else {
+			rf.mu.Lock()
+			appendEntriesReply.Term = rf.Term
+			rf.mu.Unlock()
+		}
 	}
 }
 
@@ -342,8 +368,9 @@ func (rf *Raft) HandleHeartBeat(heartBeat *AppendEntries, heartBeatReply *HeartB
 func (rf *Raft) ElectionTimerCounter() {
 	for {
 		// Don't timeout if it is the leader
+		// If the timer is already 0 then don't hold the locks
 		rf.mu.Lock()
-		if !rf.IsLeader {
+		if !rf.IsLeader && rf.ElectionTimeOut > 0 {
 			rf.ElectionTimeOut = rf.ElectionTimeOut - 1
 		}
 		rf.mu.Unlock()
@@ -353,6 +380,11 @@ func (rf *Raft) ElectionTimerCounter() {
 
 func (rf *Raft) ElectLeader() {
 	for {
+
+		// We cannot lock a variable in all the places in a program
+		// This lock will only lock this particular portion of the pgrm.
+		// Other places where they access these variables are not locked.
+
 		rf.mu.Lock()
 		timeout := rf.ElectionTimeOut
 		isLeader := rf.IsLeader
@@ -371,38 +403,64 @@ func (rf *Raft) ElectLeader() {
 			majority := GetMajority(len(rf.peers))
 			fmt.Println("majority:", majority, "node:", rf.me, "No of peers", len(rf.peers))
 			for i := 0; i <= (len(rf.peers) - 1); i++ {
+				if rf.getElectionTimeout() > 0 {
+					break
+				}
 				go func(vote *int, server int) {
 					reply := &RequestVoteReply{}
+					if rf.getElectionTimeout() > 0 {
+						return
+					}
 					rf.sendRequestVote(server, requestArgs, reply)
-					// time.Sleep(3 * time.Millisecond)
+					// time.Sleep(2 * time.Millisecond)
 					if reply.VoteGranted {
 						rf.mu.Lock()
 						*vote = *vote + 1
 						rf.mu.Unlock()
+					} else {
+						rf.mu.Lock()
+						currentTerm := rf.Term
+						rf.mu.Unlock()
+						if reply.Term > currentTerm {
+							rf.mu.Lock()
+							rf.Term = reply.Term
+							rf.ElectionTimeOut = GetRandomElectionTimeout()
+							rf.mu.Unlock()
+						}
 					}
 				}(&votes, i)
 			}
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(3 * time.Millisecond)
 			rf.mu.Lock()
 			electionWon := votes >= majority
 			rf.mu.Unlock()
 			if electionWon {
-				rf.mu.Lock()
-				rf.IsLeader = true
-				rf.mu.Unlock()
-				rf.ImmediateHeartBeat()
-				fmt.Println(rf.me, " is the Leader...")
+				if rf.getElectionTimeout() <= 0 {
+					rf.mu.Lock()
+					rf.IsLeader = true
+					rf.ElectionTimeOut = GetRandomElectionTimeout()
+					rf.mu.Unlock()
+					go rf.ImmediateHeartBeat()
+					fmt.Println(rf.me, " is the Leader...")
+				}
 
 			} else {
-				rf.mu.Lock()
-				rf.IsLeader = false
-				rf.mu.Unlock()
+				rf.resetElectionTimeout()
 			}
-			rf.mu.Lock()
-			rf.ElectionTimeOut = GetRandomElectionTimeout()
-			rf.mu.Unlock()
-
 		}
 	}
 
+}
+
+func (rf *Raft) getElectionTimeout() int {
+	rf.mu.Lock()
+	timeout := rf.ElectionTimeOut
+	rf.mu.Unlock()
+	return timeout
+}
+
+func (rf *Raft) resetElectionTimeout() {
+	rf.mu.Lock()
+	rf.ElectionTimeOut = GetRandomElectionTimeout()
+	rf.mu.Unlock()
 }
