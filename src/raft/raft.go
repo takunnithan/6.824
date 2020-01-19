@@ -154,7 +154,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	_, voted := rf.VotedFor[args.Term]
 	currentTerm := rf.Term
 	rf.mu.Unlock()
+
+	// Only accept the request votes from candidates who has higher term -- Not even equal
+	// If you are running an election and get a vote request with same term -- means the other server
+	// is a your opponent -- No need to vote since you already voted for yourself.
+
+	// WRONG -- args.Term > currentTerm
+
 	if (args.Term >= currentTerm) && (!voted) {
+
+		// Stop any ongoing election for older terms
+
 		rf.mu.Lock()
 		rf.IsLeader = false
 		rf.ElectionTimeOut = GetRandomElectionTimeout()
@@ -349,6 +359,9 @@ func (rf *Raft) AppendEntries(appendEntries *AppendEntries, appendEntriesReply *
 		isNewTerm := rf.Term <= appendEntries.Term
 		rf.mu.Unlock()
 		if isNewTerm {
+
+			// If there is an ongoing election stop it -- Stop Election
+
 			rf.mu.Lock()
 			rf.IsLeader = false
 			rf.ElectionTimeOut = GetRandomElectionTimeout()
@@ -390,9 +403,15 @@ func (rf *Raft) ElectLeader() {
 		isLeader := rf.IsLeader
 		rf.mu.Unlock()
 		if timeout <= 0 && !isLeader {
+
+			// Reset the election timer here when you start a new election!!
+
 			rf.mu.Lock()
 			rf.Term = rf.Term + 1 // Incrementing term
-			votes := 1            // Self voting
+
+			// This self voting should be added to the `VotedFor` of the new term
+
+			votes := 1 // Self voting
 			requestArgs := &RequestVoteArgs{
 				Term:         rf.Term,
 				CandidateID:  rf.me,
@@ -413,6 +432,9 @@ func (rf *Raft) ElectLeader() {
 					}
 					rf.sendRequestVote(server, requestArgs, reply)
 					// time.Sleep(2 * time.Millisecond)
+
+					// Wait until the reply has value -- In real RPC we will have to wait for a reply RPC
+
 					if reply.VoteGranted {
 						rf.mu.Lock()
 						*vote = *vote + 1
@@ -423,6 +445,10 @@ func (rf *Raft) ElectLeader() {
 						rf.mu.Unlock()
 						if reply.Term > currentTerm {
 							rf.mu.Lock()
+
+							// The current election is still in progress -> But Term is updated -- WRONG --
+							// Find a way to stop election --> channels ??
+
 							rf.Term = reply.Term
 							rf.ElectionTimeOut = GetRandomElectionTimeout()
 							rf.mu.Unlock()
@@ -445,6 +471,8 @@ func (rf *Raft) ElectLeader() {
 				}
 
 			} else {
+				// If election loses then do nothing and wait for timeout for next election
+				// Do not reset the timer -- This is wrong!
 				rf.resetElectionTimeout()
 			}
 		}
