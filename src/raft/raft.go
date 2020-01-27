@@ -20,6 +20,7 @@ package raft
 import (
 	"labrpc"
 	"sync"
+	"time"
 )
 
 // import "bytes"
@@ -40,7 +41,6 @@ import (
 const FOLLOWER string = "FOLLOWER"
 const CANDIDATE string = "CANDIDATE"
 const LEADER string = "LEADER"
-const HEARTBEAT_TIMEOUT int = 10
 
 type ApplyMsg struct {
 	CommandValid bool
@@ -63,16 +63,16 @@ type MatchIndex struct {
 }
 
 type AppendEntriesArgs struct {
-	Term int
-	LeaderId int
+	Term         int
+	LeaderId     int
 	PrevLogIndex int
-	PrevLogTerm int
-	Entries []Log
+	PrevLogTerm  int
+	Entries      []Log
 	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
-	Term int
+	Term    int
 	Success bool
 }
 
@@ -178,19 +178,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		reply.VoteGranted = False
+		reply.VoteGranted = false
 	}
-	if rf.votedFor == args.CandidateId || rf.votedFor == nil {
-		follower_last_log = rf.log[len(rf.log)-1]
+	if rf.votedFor == args.CandidateId || rf.votedFor == 1111 {
+		follower_last_log := rf.log[len(rf.log)-1]
 		if args.LastLogTerm >= follower_last_log.term {
 			if args.LastLogTerm == follower_last_log.term && args.LastLogIndex < len(rf.log)-1 {
 				reply.Term = rf.currentTerm
-				reply.VoteGranted = False
+				reply.VoteGranted = false
 			}
 			reply.Term = rf.currentTerm
-			reply.VoteGranted = True
+			reply.VoteGranted = true
 
 			// Updating rf
+			rf.votedFor = args.CandidateId
 			rf.currentTerm = args.Term
 			rf.state = FOLLOWER
 			rf.electionTimer = GetRandomElectionTimeout()
@@ -234,52 +235,49 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) HandleElection() {
 	majority := GetMajority(len(rf.otherServers))
-	if rf.state == CANDIDATE {
-		rf.currentTerm = rf.currentTerm + 1
-		voteGranted := 1
-		electionTerm := rf.currentTerm
-		args := &RequestVoteArgs {
-			Term: electionTerm, 
-			CandidateId  rf.me
-			LastLogIndex: len(rf.log) -1
-			LastLogTerm : rf.log(len(rf.log) -1).term
-		}
-		rf.electionTimer = GetRandomElectionTimeout()
-		var wg sync.WaitGroup
-    	wg.Add(len(rf.otherServers))
-		for _, server := range rf.otherServers {
-			go func(rf *Raft, server int, args *RequestVoteArgs, wg *WaitGroup) {
-				reply = &RequestVoteReply {}
-				response := rf.sendRequestVote(server, args, reply)
-				while rf.electionTimer > 0 {
-					if response {
-						if reply.VoteGranted {
-							voteGranted = voteGranted + 1   // Potential data race
-						}else {
-							if reply.Term > electionTerm {
-								rf.currentTerm = reply.Term
+	for {
+		if rf.state == CANDIDATE {
+			rf.currentTerm = rf.currentTerm + 1
+			rf.votedFor = 1111
+			voteGranted := 1
+			electionTerm := rf.currentTerm
+			args := &RequestVoteArgs{
+				Term:         electionTerm,
+				CandidateId:  rf.me,
+				LastLogIndex: len(rf.log) - 1,
+				LastLogTerm:  rf.log[len(rf.log)-1].term}
+			rf.electionTimer = GetRandomElectionTimeout()
+			var wg sync.WaitGroup
+			wg.Add(len(rf.otherServers))
+			for _, server := range rf.otherServers {
+				go func(rf *Raft, server int, args *RequestVoteArgs, voteGranted *int, wg *sync.WaitGroup) {
+					reply := &RequestVoteReply{}
+					response := rf.sendRequestVote(server, args, reply)
+					for rf.electionTimer > 0 {
+						if response {
+							if reply.VoteGranted {
+								*voteGranted = *voteGranted + 1 // Potential data race
+							} else {
+								if reply.Term > electionTerm {
+									rf.currentTerm = reply.Term
+									rf.votedFor = 1111
+								}
+							}
+							wg.Done()
 						}
 					}
 					wg.Done()
+				}(rf, server, args, &voteGranted, &wg)
+			}
+			wg.Wait() // Hopefully RPC Call() will have a timeout (smaller than election tmout)
+			if rf.electionTimer > 0 {
+				if rf.currentTerm == electionTerm {
+					if voteGranted >= majority {
+						rf.state = LEADER
+						rf.electionTimer = GetRandomElectionTimeout()
+					}
 				}
 			}
-			wg.Done()
-			}(rf, server, args, &voteGranted)
-		}
-		wg.Wait()  // Hopefully RPC Call() will have a timeout (smaller than election tmout)
-		if rf.electionTimer > 0 {
-			if rf.currentTerm == electionTerm {
-				if voteGranted >= majority {
-					rf.state = LEADER
-					rf.electionTimer = GetRandomElectionTimeout()
-				} else {
-					rf.convertToFollower()
-				}
-			} else {
-				rf.convertToFollower()
-			}
-		} else {
-			rf.convertToFollower()
 		}
 	}
 }
@@ -298,39 +296,68 @@ func (rf *Raft) ElectionTimerCounter() {
 	}
 }
 
-func (rf *Raft) sendAppendEntries(server int, *args AppendEntriesArgs, *reply AppendEntriesReply) {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
-func (rf *Raft) getAppendEntriesArgs() AppendEntriesArgs {
+func (rf *Raft) getAppendEntriesArgs() *AppendEntriesArgs {
+	previousLogIndex := 1111 // Used 1111 Instead of nil
+	previousLogTerm := 1111
 	if len(rf.log) >= 2 {
-		previousLogIndex = len(rf.log) -2
+		previousLogIndex := len(rf.log) - 2
 		previousLog := rf.log[previousLogIndex]
-		previousLogTerm = previousLog.Term
-	} else {
-		previousLogIndex = nil
-		previousLogTerm = nil
+		previousLogTerm = previousLog.term
 	}
 	args := &AppendEntriesArgs{
-		Term: rf.currentTerm
-		LeaderId: rf.me
-		PrevLogIndex: previousLogIndex
-		PrevLogTerm: previousLogTerm
-		Entries: nil
-		LeaderCommit: rf.commitIndex
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: previousLogIndex,
+		PrevLogTerm:  previousLogTerm,
+		Entries:      nil, // Update this for AppendEntries
+		LeaderCommit: rf.commitIndex}
+	return args
+}
+
+// Does this send heartbeats immediately , when a candidate becomes a leader  ????
+func (rf *Raft) HeartBeat() {
+	for {
+		if rf.state == LEADER {
+			args := rf.getAppendEntriesArgs()
+			reply := &AppendEntriesReply{}
+			for _, server := range rf.otherServers {
+				go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+					response := rf.sendAppendEntries(server, args, reply)
+					for response {
+						if reply.Term > rf.currentTerm {
+							rf.currentTerm = reply.Term
+							rf.votedFor = 1111
+							rf.convertToFollower()
+						}
+					}
+				}(server, args, reply)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 
-func (rf *Raft) HeartBeat() {
-	if rf.state == LEADER {
-		args := getAppendEntriesArgs()
-		reply := &AppendEntriesReply{}
-		for _, server := range rf.otherServers {
-			response := rf.sendAppendEntries(server, &args, &reply)
-		}
-		time.Sleep(HEARTBEAT_TIMEOUT * time.Millisecond)
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	// Check if it is a heartbeat or regular append entries RPC
+	// check the conditions
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
 	}
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.votedFor = 1111
+		rf.convertToFollower()
+	}
+	// Do the other checks for AppendEntries
+	reply.Success = true
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -384,8 +411,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.votedFor = 1111
+	for index := range rf.peers {
+		if index != rf.me {
+			rf.otherServers = append(rf.otherServers, index)
+		}
+	}
 
 	// Your initialization code here (2A, 2B, 2C).
+	go rf.ElectionTimerCounter()
+	go rf.HandleElection()
+	go rf.HeartBeat()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
