@@ -1,6 +1,11 @@
 package raft
 
-import "log"
+import (
+	"log"
+	"math"
+	"math/rand"
+	"time"
+)
 
 // Debugging
 const Debug = 0
@@ -10,4 +15,15 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 		log.Printf(format, a...)
 	}
 	return
+}
+
+func GetRandomElectionTimeout() int {
+	rand.Seed(time.Now().UnixNano())
+	return rand.Intn(150) + 150
+
+}
+
+func GetMajority(noOfServers int) int {
+	noOfServer := float64(noOfServers)
+	return int(math.Ceil(noOfServer / 2))
 }
