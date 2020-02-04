@@ -50,7 +50,7 @@ type ApplyMsg struct {
 }
 
 type Log struct {
-	Command string
+	Command interface{}
 	Term    int
 }
 type NextIndex struct {
@@ -172,6 +172,7 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
+	Success     bool
 }
 
 func (rf *Raft) acceptVoteRequest(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -209,11 +210,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	// Terrible Check -- Need Changes
-	rf.mu.Lock()  //-------------->
+	rf.mu.Lock() //-------------->
 	votedFor := rf.votedFor
-	rf.mu.Unlock()  //---------------->
+	rf.mu.Unlock() //---------------->
 	if votedFor[args.Term] == args.CandidateId || votedFor[args.Term] == 0 {
-		rf.mu.Lock()  //--------->
+		rf.mu.Lock() //--------->
 		log := rf.log
 		rf.mu.Unlock()
 		if len(log) > 0 { // No logs
@@ -326,7 +327,7 @@ func (rf *Raft) HandleElection() {
 					}
 				}(rf, server, args, &voteGranted, &wg)
 			}
-			wg.Wait() // Hopefully RPC Call() will have a timeout (smaller than election tmout)
+			wg.Wait()    // Hopefully RPC Call() will have a timeout (smaller than election tmout)
 			rf.mu.Lock() //---->
 			if rf.electionTimer > 0 {
 				if rf.currentTerm == electionTerm {
@@ -372,7 +373,7 @@ func (rf *Raft) ElectionTimerCounter() {
 	}
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan bool)  {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan bool) {
 	rf.mu.Lock() //-------?
 	peer := rf.peers[server]
 	rf.mu.Unlock() //------->
@@ -412,7 +413,7 @@ func (rf *Raft) HeartBeat() {
 					ch := make(chan bool, 1)
 					rf.sendAppendEntries(server, args, reply, ch)
 					select {
-					case res := <- ch:
+					case res := <-ch:
 						if res {
 							rf.mu.Lock() //---------->
 							if reply.Term > rf.currentTerm {
@@ -480,11 +481,55 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
+
+	// TODO: Use Locks --->
+
+	// 1) Add to the log
+	rf.mu.Lock()
+	rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
+	index := len(rf.log) + 1
+	term := rf.currentTerm
+	isLeader := rf.state == LEADER
+	rf.mu.Unlock()
+
+	// 2) send of AppendEntries RPCs  on Go routines
+	// 1) launch one go routine --> Then fan out
+	// 2) Wait for the reply and commit the entry
+	lastLogEntry := rf.log[len(rf.log)-1]
+	go func(lastLogEntry Log, rf *Raft) {
+		var replicationCounter int
+		var wg sync.WaitGroup
+		appendEntriesArgs := rf.getAppendEntriesArgs()
+		for _, server := range rf.otherServers {
+			wg.Add(1)
+			go func(server int, log Log, rf *Raft, wg *sync.WaitGroup, replicationCounter *int) {
+				ch := make(chan bool)
+				reply := &AppendEntriesReply{}
+				rf.sendAppendEntries(server, appendEntriesArgs, reply, ch)
+				select {
+				case res := <-ch:
+					if res {
+						if reply.Success {
+							*replicationCounter = *replicationCounter + 1
+						}
+					}
+					wg.Done()
+				case <-time.After(1 * time.Millisecond):
+					wg.Done()
+				}
+			}(server, lastLogEntry, rf, &wg, &replicationCounter)
+		}
+
+		wg.Wait()
+
+		// 1) Check the `replicationCounter` against majority(helper func)
+		// 2) if majority replicated the log then commit it & increase the commit index
+		// 3) Next step ???
+
+	}(lastLogEntry, rf)
+
+	// 3) Return appropriate values
 
 	return index, term, isLeader
 }
