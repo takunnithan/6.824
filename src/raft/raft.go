@@ -488,7 +488,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 1) Add to the log
 	rf.mu.Lock()
 	rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
-	index := len(rf.log) + 1
+	index := len(rf.log)
 	term := rf.currentTerm
 	isLeader := rf.state == LEADER
 	rf.mu.Unlock()
@@ -526,6 +526,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		// 1) Check the `replicationCounter` against majority(helper func)
 		// 2) if majority replicated the log then commit it & increase the commit index
 		// 3) Next step ???
+		majority := GetMajority(len(rf.peers))
+		if replicationCounter >= majority {
+			rf.commitIndex = 1 + rf.commitIndex
+		} else {
+			// TODO: Remove the newly appended entry | don't insert the new entry until majority replicates it
+		}
 
 	}(lastLogEntry, rf)
 
@@ -570,6 +576,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.currentTerm = 0
+	rf.commitIndex = 0
 	rf.votedFor = make(map[int]int)
 	rf.state = FOLLOWER
 	rf.electionTimer = GetRandomElectionTimeout()
