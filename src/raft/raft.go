@@ -20,6 +20,7 @@ package raft
 import (
 	"fmt"
 	"labrpc"
+	"math"
 	"sync"
 	"time"
 )
@@ -52,10 +53,6 @@ type ApplyMsg struct {
 type Log struct {
 	Command interface{}
 	Term    int
-}
-type NextIndex struct {
-	Index  int
-	Server int
 }
 
 type MatchIndex struct {
@@ -90,7 +87,7 @@ type Raft struct {
 	log              []Log
 	commitIndex      int
 	lastAppliedIndex int
-	nextIndex        []NextIndex
+	nextIndex        map[int]int
 	matchIndex       []MatchIndex
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -334,6 +331,7 @@ func (rf *Raft) HandleElection() {
 					if voteGranted >= majority {
 						rf.state = LEADER
 						rf.electionTimer = GetRandomElectionTimeout()
+						rf.setNextIndex()
 						fmt.Println("I AM THE LEADER", rf.me, "majority: ", majority, "Votes: ", voteGranted)
 					}
 				}
@@ -342,6 +340,14 @@ func (rf *Raft) HandleElection() {
 		}
 		time.Sleep(10 * time.Microsecond)
 	}
+}
+
+func (rf *Raft) setNextIndex() {
+	rf.mu.Lock()
+	for _, server := range rf.otherServers {
+		rf.nextIndex[server] = len(rf.log)
+	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) convertToFollower() {
@@ -381,7 +387,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	ch <- ok
 }
 
-func (rf *Raft) getAppendEntriesArgs() *AppendEntriesArgs {
+func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, server int) *AppendEntriesArgs {
+	// TODO: Update: Handle RPCs for Heartbeat & AppendEntries
+
 	previousLogIndex := 1111 // Used 1111 Instead of nil
 	previousLogTerm := 1111
 	if len(rf.log) >= 2 {
@@ -389,12 +397,17 @@ func (rf *Raft) getAppendEntriesArgs() *AppendEntriesArgs {
 		previousLog := rf.log[previousLogIndex]
 		previousLogTerm = previousLog.Term
 	}
+	var logEntries []log
+	if !isHeartBeat {
+		nextIndex := rf.nextIndex[server]
+		logEntries = rf.log[nextIndex:]
+	}
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: previousLogIndex,
 		PrevLogTerm:  previousLogTerm,
-		Entries:      nil, // Update this for AppendEntries
+		Entries:      logEntries,
 		LeaderCommit: rf.commitIndex}
 	return args
 }
@@ -406,9 +419,9 @@ func (rf *Raft) HeartBeat() {
 		currentState := rf.state
 		rf.mu.Unlock() //---->
 		if currentState == LEADER {
-			args := rf.getAppendEntriesArgs()
 			reply := &AppendEntriesReply{}
 			for _, server := range rf.otherServers {
+				args := rf.getAppendEntriesArgs(true, server)
 				go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 					ch := make(chan bool, 1)
 					rf.sendAppendEntries(server, args, reply, ch)
@@ -445,24 +458,54 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.Term = currentTerm
 		return
-	}
-	rf.mu.Lock() //----->
-	currentTerm = rf.currentTerm
-	rf.mu.Unlock()
-	if args.Term > currentTerm {
+	} else {
+		//if args.Term > currentTerm {
 		rf.mu.Lock()
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
 		rf.mu.Unlock()
 	}
+
+	// HeartBeat
+	if len(args.Entries) == 0 {
+		rf.mu.Lock() //----->
+		rf.convertToFollower()
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock() //------------->
+		reply.Success = true
+		return
+	}
+
 	// Do the other checks for AppendEntries
 	// Only reset election timer for heart beats
+
+	if len(rf.log)-1 < args.PrevLogIndex {
+		reply.Success = false
+		reply.Term = currentTerm
+		return
+	} else {
+		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			rf.log = rf.log[:args.PrevLogIndex -1]
+			reply.Success = false
+			reply.Term = rf.currentTerm
+			return
+		}
+		//else {
+		//	rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
+		//}
+	}
+
 	rf.mu.Lock() //----->
+	rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
 	rf.convertToFollower()
 	reply.Term = rf.currentTerm
+	if args.LeaderCommit > len(rf.log) - 1 {
+		rf.commitIndex = len(rf.log) -1
+	} else {
+		rf.commitIndex = args.LeaderCommit
+	}
 	rf.mu.Unlock() //------------->
 	reply.Success = true
-
 	return
 }
 
@@ -500,8 +543,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	go func(lastLogEntry Log, rf *Raft) {
 		var replicationCounter int
 		var wg sync.WaitGroup
-		appendEntriesArgs := rf.getAppendEntriesArgs()
 		for _, server := range rf.otherServers {
+			appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
 			wg.Add(1)
 			go func(server int, log Log, rf *Raft, wg *sync.WaitGroup, replicationCounter *int) {
 				ch := make(chan bool)
@@ -512,6 +555,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					if res {
 						if reply.Success {
 							*replicationCounter = *replicationCounter + 1
+						} else {
+							// TODO: Start a new go routine to get the logs match --> in a loop
+							// TODO: Include all the logs entries in one RPC, reduce the no of RPCs
+
 						}
 					}
 					wg.Done()
