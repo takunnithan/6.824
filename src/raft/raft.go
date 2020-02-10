@@ -598,12 +598,23 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) updateFollowerLogs(server int) {
-	rf.nextIndex[server] = rf.commitIndex - 1
 	for {
+		rf.nextIndex[server] = rf.nextIndex[server] - 1
 		appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
-
+		reply := &AppendEntriesReply{}
+		ch := make(chan bool)
+		rf.sendAppendEntries(server, appendEntriesArgs, reply, ch)
+		select {
+		case res := <-ch:
+			if res {
+				if reply.Success {
+					return
+				}
+			}
+		case <-time.After(1 * time.Millisecond):
+			continue
+		}
 	}
-
 }
 
 //
