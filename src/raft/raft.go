@@ -20,7 +20,6 @@ package raft
 import (
 	"fmt"
 	"labrpc"
-	"math"
 	"sync"
 	"time"
 )
@@ -390,16 +389,23 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, server int) *AppendEntriesArgs {
 	// TODO: Update: Handle RPCs for Heartbeat & AppendEntries
 
-	previousLogIndex := 1111 // Used 1111 Instead of nil
-	previousLogTerm := 1111
-	if len(rf.log) >= 2 {
-		previousLogIndex := len(rf.log) - 2
-		previousLog := rf.log[previousLogIndex]
-		previousLogTerm = previousLog.Term
-	}
-	var logEntries []log
+	//previousLogIndex := 1111 // Used 1111 Instead of nil
+	//previousLogTerm := 1111
+	//if len(rf.log) >= 2 {
+	//	previousLogIndex := len(rf.log) - 2
+	//	previousLog := rf.log[previousLogIndex]
+	//	previousLogTerm = previousLog.Term
+	//}
+
+	// Using next index to get previousLogTerm & Index
+
+	nextIndex := rf.nextIndex[server]
+	previousLogIndex := nextIndex - 1
+	previousLog := rf.log[previousLogIndex]
+	previousLogTerm := previousLog.Term
+
+	var logEntries []Log
 	if !isHeartBeat {
-		nextIndex := rf.nextIndex[server]
 		logEntries = rf.log[nextIndex:]
 	}
 	args := &AppendEntriesArgs{
@@ -485,7 +491,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	} else {
 		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			rf.log = rf.log[:args.PrevLogIndex -1]
+			rf.log = rf.log[:args.PrevLogIndex-1]
 			reply.Success = false
 			reply.Term = rf.currentTerm
 			return
@@ -499,8 +505,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
 	rf.convertToFollower()
 	reply.Term = rf.currentTerm
-	if args.LeaderCommit > len(rf.log) - 1 {
-		rf.commitIndex = len(rf.log) -1
+	if args.LeaderCommit > len(rf.log)-1 {
+		rf.commitIndex = len(rf.log) - 1
 	} else {
 		rf.commitIndex = args.LeaderCommit
 	}
@@ -558,7 +564,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 						} else {
 							// TODO: Start a new go routine to get the logs match --> in a loop
 							// TODO: Include all the logs entries in one RPC, reduce the no of RPCs
+							// Decrease the commit index for this server
+							go func(server int, rf *Raft) {
+								rf.nextIndex[server] = rf.commitIndex - 1
 
+							}(server, rf)
 						}
 					}
 					wg.Done()
@@ -585,6 +595,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 3) Return appropriate values
 
 	return index, term, isLeader
+}
+
+func (rf *Raft) updateFollowerLogs(server int) {
+	rf.nextIndex[server] = rf.commitIndex - 1
+	for {
+		appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
+
+	}
+
 }
 
 //
