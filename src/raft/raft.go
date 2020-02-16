@@ -268,8 +268,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) getRequestVoteArgs() *RequestVoteArgs {
-	LastLogIndex := 1111
-	LastLogTerm := 1111
+	LastLogIndex := -1
+	LastLogTerm := -1
 	if len(rf.log) > 0 {
 		LastLogIndex = len(rf.log) - 1
 		LastLogTerm = rf.log[LastLogIndex].Term
@@ -325,17 +325,24 @@ func (rf *Raft) HandleElection() {
 			}
 			wg.Wait()    // Hopefully RPC Call() will have a timeout (smaller than election tmout)
 			rf.mu.Lock() //---->
-			if rf.electionTimer > 0 {
-				if rf.currentTerm == electionTerm {
+			rfElectionTimer := rf.electionTimer
+			rfCurrentTerm := rf.currentTerm
+			rf.mu.Unlock()
+			if rfElectionTimer > 0 {
+				if rfCurrentTerm == electionTerm {
 					if voteGranted >= majority {
+						rf.mu.Lock()
 						rf.state = LEADER
-						rf.electionTimer = GetRandomElectionTimeout()
+						rf.mu.Unlock()
 						rf.setNextIndex()
+						rf.mu.Lock()
+						rf.electionTimer = GetRandomElectionTimeout()
+						rf.mu.Unlock()
+						rf.HeartBeat(true)
 						fmt.Println("I AM THE LEADER", rf.me, "majority: ", majority, "Votes: ", voteGranted)
 					}
 				}
 			}
-			rf.mu.Unlock() //----->
 		}
 		time.Sleep(10 * time.Microsecond)
 	}
@@ -360,7 +367,7 @@ func (rf *Raft) convertToCandidate() {
 		rf.mu.Lock()
 		if rf.electionTimer == 0 && rf.state != CANDIDATE {
 			rf.state = CANDIDATE
-			//fmt.Println(rf.me, " has become a candidate")
+			fmt.Println(rf.me, " has become a candidate")
 		}
 		rf.mu.Unlock()
 		time.Sleep(5 * time.Microsecond)
@@ -398,11 +405,14 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, server int) *AppendEntrie
 	//}
 
 	// Using next index to get previousLogTerm & Index
-
+	previousLogIndex := -1
+	previousLogTerm := -1
 	nextIndex := rf.nextIndex[server]
-	previousLogIndex := nextIndex - 1
-	previousLog := rf.log[previousLogIndex]
-	previousLogTerm := previousLog.Term
+	if nextIndex > 0 {
+		previousLogIndex = nextIndex - 1
+		previousLog := rf.log[previousLogIndex]
+		previousLogTerm = previousLog.Term
+	}
 
 	var logEntries []Log
 	if !isHeartBeat {
@@ -419,7 +429,7 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, server int) *AppendEntrie
 }
 
 // Does this send heartbeats immediately , when a candidate becomes a leader  ????
-func (rf *Raft) HeartBeat() {
+func (rf *Raft) HeartBeat(immediate bool) {
 	for {
 		rf.mu.Lock() //---->
 		currentState := rf.state
@@ -449,6 +459,9 @@ func (rf *Raft) HeartBeat() {
 				}(server, args, reply)
 			}
 			time.Sleep(10 * time.Millisecond)
+		}
+		if immediate {
+			return
 		}
 		time.Sleep(2 * time.Microsecond)
 	}
@@ -484,17 +497,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Do the other checks for AppendEntries
 	// Only reset election timer for heart beats
+	fmt.Println("Receiver: ", rf.me, "logs: ", rf.log, " Term: ", rf.currentTerm)
+	fmt.Println("Args from ", args.LeaderId)
+	fmt.Println("prevLogIndex:", args.PrevLogIndex, " Term: ", args.Term, "Log entries: ", args.Entries)
 
 	if len(rf.log)-1 < args.PrevLogIndex {
 		reply.Success = false
 		reply.Term = currentTerm
 		return
 	} else {
-		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			rf.log = rf.log[:args.PrevLogIndex-1]
-			reply.Success = false
-			reply.Term = rf.currentTerm
-			return
+		if args.PrevLogIndex != -1 {
+			if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+				rf.log = rf.log[:args.PrevLogIndex-1]
+				reply.Success = false
+				reply.Term = rf.currentTerm
+				return
+			}
 		}
 		//else {
 		//	rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
@@ -502,7 +520,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.mu.Lock() //----->
-	rf.log = append(rf.log[:args.PrevLogIndex], args.Entries...)
+	var rfLogs []Log
+	if args.PrevLogIndex != -1 {
+		rfLogs = rf.log[:args.PrevLogIndex]
+	}
+	rf.log = append(rfLogs, args.Entries...)
 	rf.convertToFollower()
 	reply.Term = rf.currentTerm
 	if args.LeaderCommit > len(rf.log)-1 {
@@ -565,10 +587,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 							// TODO: Start a new go routine to get the logs match --> in a loop
 							// TODO: Include all the logs entries in one RPC, reduce the no of RPCs
 							// Decrease the commit index for this server
-							go func(server int, rf *Raft) {
-								rf.nextIndex[server] = rf.commitIndex - 1
-
-							}(server, rf)
+							go rf.updateFollowerLogs(server)
 						}
 					}
 					wg.Done()
@@ -588,6 +607,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.commitIndex = 1 + rf.commitIndex
 		} else {
 			// TODO: Remove the newly appended entry | don't insert the new entry until majority replicates it
+			rf.log = rf.log[:index-1]
 		}
 
 	}(lastLogEntry, rf)
@@ -611,7 +631,7 @@ func (rf *Raft) updateFollowerLogs(server int) {
 					return
 				}
 			}
-		case <-time.After(1 * time.Millisecond):
+		case <-time.After(1 * time.Millisecond):	// This could turn into a eternal loop
 			continue
 		}
 	}
@@ -655,6 +675,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.commitIndex = 0
 	rf.votedFor = make(map[int]int)
+	rf.nextIndex = make(map[int]int)
 	rf.state = FOLLOWER
 	rf.electionTimer = GetRandomElectionTimeout()
 	fmt.Println(rf.electionTimer)
@@ -664,7 +685,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ElectionTimerCounter()
 	go rf.convertToCandidate()
 	go rf.HandleElection()
-	go rf.HeartBeat()
+	go rf.HeartBeat(false)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
