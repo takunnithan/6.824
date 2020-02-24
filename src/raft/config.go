@@ -167,6 +167,9 @@ func (cfg *config) start1(i int) {
 	applyCh := make(chan ApplyMsg)
 	go func() {
 		for m := range applyCh {
+			fmt.Println("==============")
+			fmt.Println(m)
+			fmt.Println("==============")
 			err_msg := ""
 			if m.CommandValid == false {
 				// ignore other types of ApplyMsg
@@ -367,7 +370,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cfg.mu.Lock()
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
-
+		fmt.Println("nCommitted: server: ", i, "Index: ", index, "cmd1: ", cmd1, " ok: ", ok)
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v\n",
@@ -440,18 +443,20 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
+					fmt.Println("I Logged the command : ", rf.me)
 					index = index1
 					break
 				}
 			}
 		}
-
+		fmt.Println("PINNACLE ACHIEVED - index: ", index )
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//fmt.Println("FROM nCommitted: nd - ", nd, " cmd1: ", cmd1)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
