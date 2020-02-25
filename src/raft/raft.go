@@ -387,17 +387,10 @@ func (rf *Raft) ElectionTimerCounter() {
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan bool) {
-	rf.mu.Lock() //-------?
+	rf.mu.Lock() //------->
 	peer := rf.peers[server]
 	rf.mu.Unlock() //------->
-	//if len(args.Entries) != 0 {
-	//	fmt.Println("Sending Append Entries")
-	//}
-	//fmt.Println("Entries Length: ", len(args.Entries))
 	ok := peer.Call("Raft.AppendEntries", args, reply)
-	//if len(args.Entries) != 0 {
-	//	fmt.Println("GOT THE RESPONSE: ", ok)
-	//}
 	ch <- ok
 }
 
@@ -504,11 +497,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// Do the other checks for AppendEntries
 	// Only reset election timer for heart beats
-	//fmt.Println("Receiver: ", rf.me, "logs: ", rf.log, " Term: ", rf.currentTerm)
-	//fmt.Println("Args from ", args.LeaderId)
-	//fmt.Println("prevLogIndex:", args.PrevLogIndex, " Term: ", args.Term, "Log entries: ", args.Entries)
 	if len(rf.log)-1 < args.PrevLogIndex {
 		reply.Success = false
 		reply.Term = currentTerm
@@ -527,26 +516,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+
+	// TODO: Something messed up here
+	// 	To fix this -> check the previousLogIndex, CommitIndex, log index
+
+
 	rf.mu.Lock() //----->
 	var rfLogs []Log
 	if args.PrevLogIndex != -1 {
 		rfLogs = rf.log[:args.PrevLogIndex]
 	}
-	rf.log = append(rfLogs, args.Entries...)
+	fmt.Println("PreviousLogIndex: ", args.PrevLogIndex, " Server: ", rf.me, " Log: ", rf.log)
+	rf.log = append(rf.log, rfLogs...)
+	fmt.Println("Arg Entries : ", args.Entries, " Server: ", rf.me)
 	for _, logEntry := range args.Entries {
-		rf.log = append(rfLogs, logEntry)
-		// TODO: check the CommandIndex -- may be its len(rf.log)
-		rf.applyCh <- ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex:len(rf.log)-1}
+		rf.log = append(rf.log, logEntry)
+		// Sending index = len(rf.log)  => since log index starts from 1
+		rf.applyCh <- ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex:len(rf.log)}
 	}
-
-
-
-	// TODO: Send a message for every entry that has been added to the log:
-
-	// TODO: See the comments in the beginning
-
-
-
+	fmt.Println("LOG from server: ", rf.me)
+	fmt.Println(rf.log)
 	rf.convertToFollower()
 	reply.Term = rf.currentTerm
 	if args.LeaderCommit > len(rf.log)-1 {
@@ -575,9 +564,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
-
-	// TODO: Use Locks --->
-
 	rf.mu.Lock()
 	term := rf.currentTerm
 	index := len(rf.log)
@@ -587,17 +573,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, isLeader
 	}
 
-	// 1) Add to the log
 	rf.mu.Lock()
-	// TODO: FIrst log index should be `1`
 	rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
-	fmt.Println("\nITs me the Leader: ", rf.me,  "Log: ", rf.log)
 	index = len(rf.log)
 	rf.mu.Unlock()
 
-	// 2) send of AppendEntries RPCs on Go routines
-	// 1) launch one go routine --> Then fan out
-	// 2) Wait for the reply and commit the entry
 	lastLogEntry := rf.log[len(rf.log)-1]
 	go func(lastLogEntry Log, rf *Raft) {
 		var replicationCounter int
@@ -606,54 +586,43 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
 			wg.Add(1)
 			go func(server int, log Log, rf *Raft, wg *sync.WaitGroup, replicationCounter *int) {
-				ch := make(chan bool)
+				ch := make(chan bool, 1)
 				reply := &AppendEntriesReply{}
 				rf.sendAppendEntries(server, appendEntriesArgs, reply, ch)
-				timer := time.NewTimer(10 * time.Millisecond)
+				timer := time.NewTimer(5 * time.Millisecond)
 				select {
 				case res := <-ch:
-					fmt.Println("GOt a response")
 					if res {
 						if reply.Success {
 							*replicationCounter = *replicationCounter + 1
 							rf.mu.Lock()
 							rf.nextIndex[server] ++
 							rf.mu.Unlock()
-							fmt.Printf("\nAppend Success server: %d, leader: %d, nextIndex: %d", server, rf.me, rf.nextIndex[server])
+							//fmt.Printf("\nAppend Success server: %d, leader: %d, nextIndex: %d", server, rf.me, rf.nextIndex[server])
 						} else {
-							// TODO: Start a new go routine to get the logs match --> in a loop
-							// TODO: Include all the logs entries in one RPC, reduce the no of RPCs
-							// Decrease the commit index for this server
 							go rf.updateFollowerLogs(server)
 						}
 					}
 					timer.Stop()
 					wg.Done()
 				case <-timer.C:
-					fmt.Println("TImED OUT")
 					wg.Done()
 				}
 			}(server, lastLogEntry, rf, &wg, &replicationCounter)
 		}
-		//fmt.Println("I am WAITING...")
 		wg.Wait()
-		fmt.Println("Reached HEREERE")
-		// 1) Check the `replicationCounter` against majority(helper func)
-		// 2) if majority replicated the log then commit it & increase the commit index
-		// 3) Next step ???
 		majority := GetMajority(len(rf.peers))
 		if replicationCounter >= majority {
 			rf.commitIndex = 1 + rf.commitIndex
 			rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex:index}
 		} else {
-			// TODO: Remove the newly appended entry | don't insert the new entry until majority replicates it
+			// Remove the newly appended entry | don't insert the new entry until majority replicates it
 			rf.log = rf.log[:index-1]
 		}
 
 	}(lastLogEntry, rf)
 
-	// 3) Return appropriate values
-
+	// Here returning index ( since logs should start from index 1)
 	return index, term, isLeader
 }
 
@@ -731,6 +700,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 	// TODO: testing code is not able to read the logs from raft
+	//  TODO: --  Logs should starts from index 1
 	// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 	rf.log = []Log{}
