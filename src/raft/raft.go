@@ -522,20 +522,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 
 	rf.mu.Lock() //----->
-	var rfLogs []Log
+	//var rfLogs []Log
 	if args.PrevLogIndex != -1 {
-		rfLogs = rf.log[:args.PrevLogIndex]
+		rf.log = rf.log[:args.PrevLogIndex+1]
 	}
-	fmt.Println("PreviousLogIndex: ", args.PrevLogIndex, " Server: ", rf.me, " Log: ", rf.log)
-	rf.log = append(rf.log, rfLogs...)
-	fmt.Println("Arg Entries : ", args.Entries, " Server: ", rf.me)
+	//fmt.Println("PreviousLogIndex: ", args.PrevLogIndex, " Server: ", rf.me, " Log: ", rf.log)
+	//rf.log = append(rf.log, rfLogs...)
+	//fmt.Println("Arg Entries : ", args.Entries, " Server: ", rf.me)
 	for _, logEntry := range args.Entries {
 		rf.log = append(rf.log, logEntry)
 		// Sending index = len(rf.log)  => since log index starts from 1
 		rf.applyCh <- ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex:len(rf.log)}
 	}
-	fmt.Println("LOG from server: ", rf.me)
-	fmt.Println(rf.log)
+	fmt.Println("server: ", rf.me, " Log: ", rf.log)
 	rf.convertToFollower()
 	reply.Term = rf.currentTerm
 	if args.LeaderCommit > len(rf.log)-1 {
