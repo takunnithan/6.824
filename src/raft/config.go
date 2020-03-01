@@ -238,7 +238,7 @@ func (cfg *config) cleanup() {
 // attach server i to the net.
 func (cfg *config) connect(i int) {
 	// fmt.Printf("connect(%d)\n", i)
-
+	fmt.Println("Reconnecting -- ", i)
 	cfg.connected[i] = true
 
 	// outgoing ClientEnds
@@ -261,7 +261,7 @@ func (cfg *config) connect(i int) {
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
-
+	fmt.Println("Disconnecting ---- ", i)
 	cfg.connected[i] = false
 
 	// outgoing ClientEnds
@@ -456,7 +456,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				//fmt.Println("FROM nCommitted: nd - ", nd, " cmd1: ", cmd1)
+				//fmt.Println("FROM One(): nd - ", nd, " cmd1: ", cmd1)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {

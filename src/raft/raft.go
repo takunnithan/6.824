@@ -291,6 +291,7 @@ func (rf *Raft) HandleElection() {
 		if currentState == CANDIDATE {
 			rf.mu.Lock() // ---->
 			rf.currentTerm = rf.currentTerm + 1
+			//fmt.Println("Candidate: ", rf.me, "Term increment: ", rf.currentTerm)
 			electionTerm := rf.currentTerm
 			rf.electionTimer = GetRandomElectionTimeout()
 			rf.mu.Unlock() // ---->
@@ -344,8 +345,14 @@ func (rf *Raft) HandleElection() {
 					}
 				}
 			}
+		if rf.state != LEADER {
+			rf.mu.Lock()
+			rf.currentTerm = rf.currentTerm - 1
+			//fmt.Println("Not a leader : ", rf.me, " Decreasing Term: ", rf.currentTerm)
+			rf.mu.Unlock()
 		}
-		time.Sleep(10 * time.Microsecond)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -415,6 +422,7 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, server int) *AppendEntrie
 		rf.mu.Lock()
 		logEntries = rf.log[nextIndex:]
 		rf.mu.Unlock()
+		fmt.Println("\n From getAppEntries -- server: ", server, "logs: ", rf.log, "nextIndex: ", nextIndex, "selected logs: ", logEntries)
 	}
 	rf.mu.Lock()
 	args := &AppendEntriesArgs{
@@ -477,6 +485,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < currentTerm {
 		reply.Success = false
 		reply.Term = currentTerm
+		fmt.Println("Small term -- server: ", rf.me, ":   argsTerm: ", args.Term, "server Term: ", rf.currentTerm)
 		return
 	} else {
 		//if args.Term > currentTerm {
@@ -496,7 +505,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		return
 	}
-
+	fmt.Println("Received server: ", rf.me, "appendEntries: ", args)
 	// Only reset election timer for heart beats
 	if len(rf.log)-1 < args.PrevLogIndex {
 		reply.Success = false
@@ -524,11 +533,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock() //----->
 	//var rfLogs []Log
 	if args.PrevLogIndex != -1 {
-		rf.log = rf.log[:args.PrevLogIndex+1]
+		rf.log = rf.log[:args.PrevLogIndex+1]	// `+1` because end `]` is exclusive
+	} else {
+		rf.log = []Log{}
 	}
-	//fmt.Println("PreviousLogIndex: ", args.PrevLogIndex, " Server: ", rf.me, " Log: ", rf.log)
-	//rf.log = append(rf.log, rfLogs...)
-	//fmt.Println("Arg Entries : ", args.Entries, " Server: ", rf.me)
 	for _, logEntry := range args.Entries {
 		rf.log = append(rf.log, logEntry)
 		// Sending index = len(rf.log)  => since log index starts from 1
@@ -579,7 +587,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	lastLogEntry := rf.log[len(rf.log)-1]
 	go func(lastLogEntry Log, rf *Raft) {
-		var replicationCounter int
+		replicationCounter := 1   // self-replication ???
 		var wg sync.WaitGroup
 		for _, server := range rf.otherServers {
 			appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
@@ -587,7 +595,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			go func(server int, log Log, rf *Raft, wg *sync.WaitGroup, replicationCounter *int) {
 				ch := make(chan bool, 1)
 				reply := &AppendEntriesReply{}
-				rf.sendAppendEntries(server, appendEntriesArgs, reply, ch)
+				fmt.Println("Sending RPC to : ", server)
+				go rf.sendAppendEntries(server, appendEntriesArgs, reply, ch)
 				timer := time.NewTimer(5 * time.Millisecond)
 				select {
 				case res := <-ch:
@@ -599,8 +608,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 							rf.mu.Unlock()
 							//fmt.Printf("\nAppend Success server: %d, leader: %d, nextIndex: %d", server, rf.me, rf.nextIndex[server])
 						} else {
-							go rf.updateFollowerLogs(server)
+							fmt.Println("Append FAILED..........")
+							rf.updateFollowerLogs(server)
+							//go rf.updateFollowerLogs(server)
 						}
+
 					}
 					timer.Stop()
 					wg.Done()
@@ -613,6 +625,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		majority := GetMajority(len(rf.peers))
 		if replicationCounter >= majority {
 			rf.commitIndex = 1 + rf.commitIndex
+			fmt.Println("server: ", rf.me, " Log: ", rf.log)
 			rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex:index}
 		} else {
 			// Remove the newly appended entry | don't insert the new entry until majority replicates it
@@ -629,12 +642,15 @@ func (rf *Raft) updateFollowerLogs(server int) {
 	fmt.Println("Updating follower logs")
 	for {
 		rf.mu.Lock()
-		rf.nextIndex[server] = rf.nextIndex[server] - 1
+		if rf.nextIndex[server] > 0 {
+			rf.nextIndex[server] = rf.nextIndex[server] - 1
+		}
 		rf.mu.Unlock()
 		appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
 		reply := &AppendEntriesReply{}
 		ch := make(chan bool)
-		rf.sendAppendEntries(server, appendEntriesArgs, reply, ch)
+		fmt.Println("From updateFollowerLogs-- server: ", server, "appendEntries: ", appendEntriesArgs)
+		go rf.sendAppendEntries(server, appendEntriesArgs, reply, ch)
 		select {
 		case res := <-ch:
 			if res {
