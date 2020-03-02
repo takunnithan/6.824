@@ -412,6 +412,7 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, server int) *AppendEntrie
 	if nextIndex > 0 {
 		previousLogIndex = nextIndex - 1
 		rf.mu.Lock()
+		//fmt.Println("server: ", server, "nextIndex: ", nextIndex, "prevIndex: ", previousLogIndex)
 		previousLog := rf.log[previousLogIndex]
 		rf.mu.Unlock()
 		previousLogTerm = previousLog.Term
@@ -488,11 +489,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		fmt.Println("Small term -- server: ", rf.me, ":   argsTerm: ", args.Term, "server Term: ", rf.currentTerm)
 		return
 	} else {
-		//if args.Term > currentTerm {
 		rf.mu.Lock()
 		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
 		rf.mu.Unlock()
+	}
+
+	//fmt.Println("Received server: ", rf.me, "appendEntries: ", args)
+	// Only reset election timer for heart beats
+	if len(rf.log)-1 < args.PrevLogIndex {
+		reply.Success = false
+		reply.Term = currentTerm
+		return
+	} else {
+		if args.PrevLogIndex != -1 {
+			if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+				rf.mu.Lock()
+				//rf.log = rf.log[:args.PrevLogIndex-1]
+				rf.log = rf.log[:args.PrevLogIndex]
+				reply.Success = false
+				reply.Term = rf.currentTerm
+				rf.mu.Unlock()
+				return
+			}
+
+		}
 	}
 
 	// HeartBeat
@@ -505,33 +526,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = true
 		return
 	}
-	fmt.Println("Received server: ", rf.me, "appendEntries: ", args)
-	// Only reset election timer for heart beats
-	if len(rf.log)-1 < args.PrevLogIndex {
-		reply.Success = false
-		reply.Term = currentTerm
-		return
-	} else {
-		if args.PrevLogIndex != -1 {
-			if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-				rf.mu.Lock()
-				rf.log = rf.log[:args.PrevLogIndex-1]
-				reply.Success = false
-				reply.Term = rf.currentTerm
-				rf.mu.Unlock()
-				return
-			}
-
-		}
-	}
-
-
-	// TODO: Something messed up here
-	// 	To fix this -> check the previousLogIndex, CommitIndex, log index
-
 
 	rf.mu.Lock() //----->
-	//var rfLogs []Log
 	if args.PrevLogIndex != -1 {
 		rf.log = rf.log[:args.PrevLogIndex+1]	// `+1` because end `]` is exclusive
 	} else {
@@ -539,17 +535,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	for _, logEntry := range args.Entries {
 		rf.log = append(rf.log, logEntry)
+
+		// =================================================
+
+		// TODO: When to send applyMsg
+		//  Should the leader send log applied message ?
+		//  CommitIndex & ApplyMsg
+		//  Read the paper & Guides by jon Gjengset
+		//  Pay more attentions to the details
+		// =================================================
+
 		// Sending index = len(rf.log)  => since log index starts from 1
 		rf.applyCh <- ApplyMsg{CommandValid: true, Command: logEntry.Command, CommandIndex:len(rf.log)}
 	}
 	fmt.Println("server: ", rf.me, " Log: ", rf.log)
 	rf.convertToFollower()
 	reply.Term = rf.currentTerm
-	if args.LeaderCommit > len(rf.log)-1 {
-		rf.commitIndex = len(rf.log) - 1
-	} else {
-		rf.commitIndex = args.LeaderCommit
+	if args.LeaderCommit > rf.commitIndex {
+		// There is no min() function for integers
+		if args.LeaderCommit > len(rf.log)-1 {
+			rf.commitIndex = len(rf.log) - 1
+		} else {
+			rf.commitIndex = args.LeaderCommit
+		}
 	}
+
 	rf.mu.Unlock() //------------->
 	reply.Success = true
 	return
@@ -627,9 +637,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.commitIndex = 1 + rf.commitIndex
 			fmt.Println("server: ", rf.me, " Log: ", rf.log)
 			rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex:index}
-		} else {
-			// Remove the newly appended entry | don't insert the new entry until majority replicates it
-			rf.log = rf.log[:index-1]
+		//} else {
+		//	// Remove the newly appended entry | don't insert the new entry until majority replicates it
+		//	rf.log = rf.log[:index-1]
 		}
 
 	}(lastLogEntry, rf)
