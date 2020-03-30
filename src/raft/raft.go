@@ -549,7 +549,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		 }
 	 }
 	 latestCommitIndex := rf.commitIndex
-	 fmt.Println("Update Commit: server: ", rf.me, "prev comm index: ", previousCommitIndex, "Latest C Ind: ", latestCommitIndex)
+	 //fmt.Println("Update Commit: server: ", rf.me, "prev comm index: ", previousCommitIndex, "Latest C Ind: ", latestCommitIndex)
 	 for i:=previousCommitIndex+1; i<= latestCommitIndex; i++ {
 		 fmt.Println("Committing: server: ", rf.me, " i: ", i, "command: ", rf.log[i].Command)
 
@@ -635,9 +635,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 							//							Check again if this necessary
 
 							if reply.Term > rf.currentTerm {
+								fmt.Println("Converting to follower - ", rf.me)
 								rf.currentTerm = reply.Term
 								rf.convertToFollower()
 							} else {
+								fmt.Println("Deci UpdateFollowerLogs - Reply term: ", reply.Term, "leader term: ", rf.currentTerm)
 								rf.updateFollowerLogs(server)
 							}
 							// -------------------------------------------------------
@@ -667,11 +669,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			//	- Check the log, find the last commit index, latest commit index - apply all in between
 
 			// ===================================================================================
-			rf.commitIndex = 1 + rf.commitIndex
+			previousCommitIndex := rf.commitIndex
+			latestCommitIndex := len(rf.log) - 1
+			rf.commitIndex = latestCommitIndex
+
+			//rf.commitIndex = 1 + rf.commitIndex
 			fmt.Println("Leader Increased commit index: ", rf.commitIndex)
-			//rf.mu.Unlock()
 			fmt.Println("server--: ", rf.me, " Log: ", rf.log)
-			rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex:index}
+
+			for i:=previousCommitIndex+1; i<= latestCommitIndex; i++ {
+				fmt.Println("Committing: server: ", rf.me, " i: ", i, "command: ", rf.log[i].Command)
+
+				// `i+1` since client expect commandIndex to start from 1
+				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex:i+1}
+			}
+
+			//rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex:index}
 		//} else {
 		//	// Remove the newly appended entry | don't insert the new entry until majority replicates it
 		//	fmt.Println(">>>>>>>>>>>>>>>>> : ", index-2)
