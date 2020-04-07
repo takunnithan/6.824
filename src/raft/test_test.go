@@ -224,6 +224,7 @@ loop:
 				if ok != true {
 					return
 				}
+				fmt.Println("WTF -- i == ", i)
 				is <- i
 			}(ii)
 		}
@@ -242,6 +243,7 @@ loop:
 		cmds := []int{}
 		for index := range is {
 			cmd := cfg.wait(index, servers, term)
+			fmt.Println(">>>>>> index: ", index, "command: ", cmd)
 			if ix, ok := cmd.(int); ok {
 				if ix == -1 {
 					// peers have moved on to later terms
@@ -288,6 +290,11 @@ loop:
 
 	cfg.end()
 }
+
+// TODO: Data Race ????
+// in Start() func, right after "Not leader: "
+
+
 
 func TestRejoin2B(t *testing.T) {
 	servers := 3

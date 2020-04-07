@@ -291,12 +291,12 @@ func (rf *Raft) HandleElection() {
 		rf.mu.Unlock() //---------->
 		if currentState == CANDIDATE {
 			rf.mu.Lock() // ---->
-
 			electionTerm := rf.currentTerm + 1
 			rf.electionTimer = GetRandomElectionTimeout()
-			rf.mu.Unlock() // ---->
 			args := rf.getRequestVoteArgs()
 			voteGranted := 1
+			rf.mu.Unlock() // ---->
+
 			var wg sync.WaitGroup
 			wg.Add(len(rf.otherServers))
 			for _, server := range rf.otherServers {
@@ -308,7 +308,9 @@ func (rf *Raft) HandleElection() {
 					case res := <-ch:
 						if res {
 							if reply.VoteGranted {
+								rf.mu.Lock()
 								*voteGranted = *voteGranted + 1 // Potential data race
+								rf.mu.Unlock()
 							} else {
 								if reply.Term > electionTerm {
 									rf.mu.Lock() // ---->
@@ -407,7 +409,7 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, server int) *AppendEntrie
 	var logEntries []Log
 	if !isHeartBeat {
 		logEntries = rf.log[nextIndex:]
-		fmt.Println("\n From getAppEntries -- server: ", server, "logs: ", rf.log, "nextIndex: ", nextIndex, "selected logs: ", logEntries)
+		//fmt.Println("\n From getAppEntries -- server: ", server, "logs: ", rf.log, "nextIndex: ", nextIndex, "selected logs: ", logEntries)
 	}
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -428,7 +430,9 @@ func (rf *Raft) HeartBeat(immediate bool) {
 		if currentState == LEADER {
 			reply := &AppendEntriesReply{}
 			for _, server := range rf.otherServers {
+				rf.mu.Lock()
 				args := rf.getAppendEntriesArgs(true, server)
+				rf.mu.Unlock()
 				go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 					ch := make(chan bool, 1)
 					rf.sendAppendEntries(server, args, reply, ch)
@@ -500,6 +504,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.mu.Lock() //----->
 		rf.convertToFollower()
 		reply.Term = rf.currentTerm
+		//fmt.Println("Heart beat: ", args)
 		rf.updateCommitIndexAndSendApplyMsg(args)
 		rf.mu.Unlock() //------------->
 		reply.Success = true
@@ -574,26 +579,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
-	for {
-		//=====================================
-		// TODO:
-		//	This doesn't handle concurrent append requests from clients -> Queue / reject ???
-		//=====================================
-		rf.mu.Lock()
-		progress := rf.appendInProgress
-		rf.mu.Unlock()
-		if progress {
-			fmt.Println("Another Append is in progress, waiting ....")
-			fmt.Println("Waiting command: ", command)
-			time.Sleep(10 * time.Millisecond)
-		} else {
-			fmt.Println("Continue with append: ", command)
-			break
-		}
-	}
-
-	fmt.Println("START COMMAND : ", command, " from: ", rf.me)
 	rf.mu.Lock()
+	fmt.Println("-----------------HEREREE-------------- by server: ", rf.me)
 	term := rf.currentTerm
 	// This is the index where the new entry will be added to
 	index := len(rf.log) + 1	// Log index starts from `1` for the clients
@@ -603,18 +590,48 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		fmt.Println("Not leader: ", rf.me)
 		return index, term, isLeader
 	}
-	rf.mu.Lock()
-	rf.appendInProgress = true
+
+	for {
+		//=====================================
+		// TODO:
+		//	This does handle concurrent append requests from clients --
+		//	But - Order is not guaranteed.  --- Or does it ???
+		//	-->>> Look into `` conditionals `` with go routines
+		//=====================================From getAppEntries -- server
+
+		rf.mu.Lock()
+		progress := rf.appendInProgress
+		rf.mu.Unlock()
+
+		if progress {
+			fmt.Println("Another Append is in progress, waiting ....")
+			fmt.Println("Waiting command: ", command)
+			time.Sleep(5 * time.Millisecond)
+		} else {
+			rf.mu.Lock()
+			rf.appendInProgress = true
+			rf.mu.Unlock()
+			fmt.Println("Continue with append: ", command)
+			break
+		}
+		time.Sleep(5 * time.Microsecond)
+	}
+
+	fmt.Println("START COMMAND : ", command, " from: ", rf.me)
+	rf.mu.Lock()			//	----> Problematic lock
+	rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
+	index = len(rf.log)
+	fmt.Println("Log Appended: ", rf.log)
 	rf.mu.Unlock()
 
+
 	go func(rf *Raft) {
-		rf.mu.Lock()
-		rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
-		fmt.Println("Log Appended: ", rf.log)
 		replicationCounter := 1   // self-replication ???
 		var wg sync.WaitGroup
 		for _, server := range rf.otherServers {
+			rf.mu.Lock()
 			appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
+			rf.mu.Unlock()
 			wg.Add(1)
 			go func(server int, rf *Raft, wg *sync.WaitGroup, replicationCounter *int) {
 				ch := make(chan bool, 1)
@@ -626,22 +643,33 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				case res := <-ch:
 					if res {
 						if reply.Success {
+							rf.mu.Lock()
+							// *************** Need locking here ------------------------------ >>>>>>>>>>>>>>>>>>>>>>>>M<<<<<<<<<<<<<<<<<,
 							*replicationCounter = *replicationCounter + 1
 							rf.nextIndex[server] ++		// Should this be run after commit
 							fmt.Printf("\nAppend Success server: %d, leader: %d, nextIndex: %d \n", server, rf.me, rf.nextIndex[server])
+							rf.mu.Unlock()
 						} else {
-							fmt.Println("Append FAILED..........")
+							fmt.Printf("Append FAILED for server: %d ..........\n", server)
 							//------------------------------------------------------------
 							//							Check again if this necessary
-
-							if reply.Term > rf.currentTerm {
-								fmt.Println("Converting to follower - ", rf.me)
-								rf.currentTerm = reply.Term
-								rf.convertToFollower()
-							} else {
-								fmt.Println("Deci UpdateFollowerLogs - Reply term: ", reply.Term, "leader term: ", rf.currentTerm)
-								rf.updateFollowerLogs(server)
+							rf.mu.Lock()
+							state := rf.state
+							rf.mu.Unlock()
+							if state != FOLLOWER {
+								rf.mu.Lock()
+								if reply.Term > rf.currentTerm {
+									fmt.Println("Converting to follower - ", rf.me)
+									rf.currentTerm = reply.Term
+									rf.log = rf.log[:len(rf.log)-1]
+									rf.convertToFollower()
+								rf.mu.Unlock()
+								} else {
+									fmt.Println("Deci UpdateFollowerLogs - Reply term: ", reply.Term, "leader term: ", rf.currentTerm)
+									rf.updateFollowerLogs(server)
+								}
 							}
+
 							// -------------------------------------------------------
 
 							//rf.updateFollowerLogs(server)
@@ -657,6 +685,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		wg.Wait()
 		majority := GetMajority(len(rf.peers))
+		rf.mu.Lock()
 		if replicationCounter >= majority && rf.state == LEADER {
 			//rf.mu.Lock()
 			// ===================================================================================
@@ -772,12 +801,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) updateFollowerLogs(server int) {
 	fmt.Println("Updating follower logs")
 	for {
-		//rf.mu.Lock()
+		rf.mu.Lock()
+		fmt.Println("Inside updateFollowerLogs...............................")
 		if rf.nextIndex[server] > 0 {
 			rf.nextIndex[server] = rf.nextIndex[server] - 1
 		}
-		//rf.mu.Unlock()
 		appendEntriesArgs := rf.getAppendEntriesArgs(false, server)
+		rf.mu.Unlock()
 		reply := &AppendEntriesReply{}
 		ch := make(chan bool)
 		fmt.Println("From updateFollowerLogs-- server: ", server, "appendEntries: ", appendEntriesArgs)
@@ -786,15 +816,16 @@ func (rf *Raft) updateFollowerLogs(server int) {
 		case res := <-ch:
 			if res {
 				if reply.Success {
-					//rf.mu.Lock()
+					rf.mu.Lock()
 					rf.nextIndex[server] ++
-					//rf.mu.Unlock()
+					rf.mu.Unlock()
 					return
 				}
 			}
 		case <-time.After(2 * time.Millisecond):	// This could turn into a eternal loop
 			continue
 		}
+		time.Sleep(5 * time.Microsecond)
 	}
 }
 

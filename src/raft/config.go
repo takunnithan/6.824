@@ -183,7 +183,7 @@ func (cfg *config) start1(i int) {
 					}
 				}
 				_, prevok := cfg.logs[i][m.CommandIndex-1]
-				//fmt.Println("Ich bin toll! - server: ", i)
+				fmt.Println("Ich bin toll! - server: ", i)
 				cfg.logs[i][m.CommandIndex] = v
 				if m.CommandIndex > cfg.maxIndex {
 					cfg.maxIndex = m.CommandIndex
@@ -191,6 +191,7 @@ func (cfg *config) start1(i int) {
 				cfg.mu.Unlock()
 
 				if m.CommandIndex > 1 && prevok == false {
+					fmt.Println("PrevOK: i: ", i, "logs: ", cfg.logs[i] )
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
 				}
 			} else {
@@ -434,6 +435,7 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 		// try all the servers, maybe one is the leader.
 		index := -1
 		for si := 0; si < cfg.n; si++ {
+			//fmt.Println("<<<<<<<<<<<<<<< server id: ", si)
 			starts = (starts + 1) % cfg.n
 			var rf *Raft
 			cfg.mu.Lock()
@@ -442,9 +444,10 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
+				fmt.Println("<<<<<<<<<<<<< Calling Start() of server: ", rf.me)
 				index1, _, ok := rf.Start(cmd)
 				if ok {
-					//fmt.Println("I Logged the command : ", rf.me)
+					fmt.Println("I Logged the command : ", rf.me, " On index: ", index1, " Command: ", cmd)
 					index = index1
 					break
 				}
