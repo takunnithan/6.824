@@ -1,43 +1,11 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
-// ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-//
-
 import (
 	"fmt"
 	"labrpc"
 	"sync"
 	"time"
 )
-
-// import "bytes"
-// import "labgob"
-
-//
-// as each Raft peer becomes aware that successive log entries are
-// committed, the peer should send an ApplyMsg to the service (or
-// tester) on the same server, via the applyCh passed to Make(). set
-// CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
-//
-// in Lab 3 you'll want to send other kinds of messages (e.g.,
-// snapshots) on the applyCh; at that point you can add fields to
-// ApplyMsg, but set CommandValid to false for these other uses.
-//
 
 const FOLLOWER string = "FOLLOWER"
 const CANDIDATE string = "CANDIDATE"
@@ -73,9 +41,6 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
-//
-// A Go object implementing a single Raft peer.
-//
 type Raft struct {
 	mu               sync.Mutex          // Lock to protect shared access to this peer's state
 	peers            []*labrpc.ClientEnd // RPC end points of all peers
@@ -88,13 +53,10 @@ type Raft struct {
 	lastAppliedIndex int
 	nextIndex        map[int]int
 	matchIndex       []MatchIndex
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-	electionTimer int
-	state         string
-	otherServers  []int
-	applyCh chan ApplyMsg
+	electionTimer    int
+	state            string
+	otherServers     []int
+	applyCh          chan ApplyMsg
 	appendInProgress bool
 }
 
@@ -104,7 +66,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
-	// Your code here (2A).
 	rf.mu.Lock()
 	term = rf.currentTerm
 	isleader = rf.state == LEADER
@@ -155,7 +116,6 @@ func (rf *Raft) readPersist(data []byte) {
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term         int
 	CandidateId  int
 	LastLogIndex int
@@ -167,7 +127,6 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	// Your data here (2A).
 	Term        int
 	VoteGranted bool
 	Success     bool
@@ -513,7 +472,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.mu.Lock() //----->
 	if args.PrevLogIndex != -1 {
-		rf.log = rf.log[:args.PrevLogIndex+1]	// `+1` because end `]` is exclusive
+		rf.log = rf.log[:args.PrevLogIndex+1] // `+1` because end `]` is exclusive
 	} else {
 		rf.log = []Log{}
 	}
@@ -542,26 +501,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	return
 }
 
- func (rf *Raft) updateCommitIndexAndSendApplyMsg(args *AppendEntriesArgs){
-	 previousCommitIndex := rf.commitIndex
-	 if args.LeaderCommit > rf.commitIndex {
-		 // There is no min() function for integers
-		 //if args.LeaderCommit > rf.commitIndex {		---- Last new entry - means last entry
-		 if args.LeaderCommit > len(rf.log) - 1 {
-			 rf.commitIndex = len(rf.log) - 1
-		 } else {
-			 rf.commitIndex = args.LeaderCommit
-		 }
-	 }
-	 latestCommitIndex := rf.commitIndex
-	 //fmt.Println("Update Commit: server: ", rf.me, "prev comm index: ", previousCommitIndex, "Latest C Ind: ", latestCommitIndex)
-	 for i:=previousCommitIndex+1; i<= latestCommitIndex; i++ {
-		 fmt.Println("Committing: server: ", rf.me, " i: ", i, "command: ", rf.log[i].Command)
+func (rf *Raft) updateCommitIndexAndSendApplyMsg(args *AppendEntriesArgs) {
+	previousCommitIndex := rf.commitIndex
+	if args.LeaderCommit > rf.commitIndex {
+		// There is no min() function for integers
+		//if args.LeaderCommit > rf.commitIndex {		---- Last new entry - means last entry
+		if args.LeaderCommit > len(rf.log)-1 {
+			rf.commitIndex = len(rf.log) - 1
+		} else {
+			rf.commitIndex = args.LeaderCommit
+		}
+	}
+	latestCommitIndex := rf.commitIndex
+	//fmt.Println("Update Commit: server: ", rf.me, "prev comm index: ", previousCommitIndex, "Latest C Ind: ", latestCommitIndex)
+	for i := previousCommitIndex + 1; i <= latestCommitIndex; i++ {
+		fmt.Println("Committing: server: ", rf.me, " i: ", i, "command: ", rf.log[i].Command)
 
-		 // `i+1` since client expect commandIndex to start from 1
-		 rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex:i+1}
-	 }
- }
+		// `i+1` since client expect commandIndex to start from 1
+		rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i + 1}
+	}
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -583,7 +542,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	fmt.Println("-----------------HEREREE-------------- by server: ", rf.me)
 	term := rf.currentTerm
 	// This is the index where the new entry will be added to
-	index := len(rf.log) + 1	// Log index starts from `1` for the clients
+	index := len(rf.log) + 1 // Log index starts from `1` for the clients
 	isLeader := rf.state == LEADER
 	rf.mu.Unlock()
 	if !isLeader {
@@ -618,15 +577,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	fmt.Println("START COMMAND : ", command, " from: ", rf.me)
-	rf.mu.Lock()			//	----> Problematic lock
+	rf.mu.Lock() //	----> Problematic lock
 	rf.log = append(rf.log, Log{Command: command, Term: rf.currentTerm})
 	index = len(rf.log)
 	fmt.Println("Log Appended: ", rf.log)
 	rf.mu.Unlock()
 
-
 	go func(rf *Raft) {
-		replicationCounter := 1   // self-replication ???
+		replicationCounter := 1 // self-replication ???
 		var wg sync.WaitGroup
 		for _, server := range rf.otherServers {
 			rf.mu.Lock()
@@ -646,7 +604,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 							rf.mu.Lock()
 							// *************** Need locking here ------------------------------ >>>>>>>>>>>>>>>>>>>>>>>>M<<<<<<<<<<<<<<<<<,
 							*replicationCounter = *replicationCounter + 1
-							rf.nextIndex[server] ++		// Should this be run after commit
+							rf.nextIndex[server] ++ // Should this be run after commit
 							fmt.Printf("\nAppend Success server: %d, leader: %d, nextIndex: %d \n", server, rf.me, rf.nextIndex[server])
 							rf.mu.Unlock()
 						} else {
@@ -663,7 +621,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 									rf.currentTerm = reply.Term
 									rf.log = rf.log[:len(rf.log)-1]
 									rf.convertToFollower()
-								rf.mu.Unlock()
+									rf.mu.Unlock()
 								} else {
 									fmt.Println("Deci UpdateFollowerLogs - Reply term: ", reply.Term, "leader term: ", rf.currentTerm)
 									rf.updateFollowerLogs(server)
@@ -706,19 +664,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			fmt.Println("Leader Increased commit index: ", rf.commitIndex)
 			fmt.Println("server--: ", rf.me, " Log: ", rf.log)
 
-			for i:=previousCommitIndex+1; i<= latestCommitIndex; i++ {
+			for i := previousCommitIndex + 1; i <= latestCommitIndex; i++ {
 				fmt.Println("Committing: server: ", rf.me, " i: ", i, "command: ", rf.log[i].Command)
 
 				// `i+1` since client expect commandIndex to start from 1
-				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex:i+1}
+				rf.applyCh <- ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i + 1}
 			}
 
 			//rf.applyCh <- ApplyMsg{CommandValid: true, Command: command, CommandIndex:index}
-		//} else {
-		//	// Remove the newly appended entry | don't insert the new entry until majority replicates it
-		//	fmt.Println(">>>>>>>>>>>>>>>>> : ", index-2)
-		//	rf.log = rf.log[:index-2]
-		//
+			//} else {
+			//	// Remove the newly appended entry | don't insert the new entry until majority replicates it
+			//	fmt.Println(">>>>>>>>>>>>>>>>> : ", index-2)
+			//	rf.log = rf.log[:index-2]
+			//
 			// TODO: Find out if master removes un successful entries ?????????????????
 		}
 		rf.appendInProgress = false
@@ -822,7 +780,7 @@ func (rf *Raft) updateFollowerLogs(server int) {
 					return
 				}
 			}
-		case <-time.After(2 * time.Millisecond):	// This could turn into a eternal loop
+		case <-time.After(2 * time.Millisecond): // This could turn into a eternal loop
 			continue
 		}
 		time.Sleep(5 * time.Microsecond)
@@ -883,9 +841,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.electionTimer = GetRandomElectionTimeout()
 	rf.applyCh = applyCh
-	rf.lastAppliedIndex = -1			// - can't be `0`.
+	rf.lastAppliedIndex = -1 // - can't be `0`.
 	rf.appendInProgress = false
-
 
 	rf.log = []Log{}
 	fmt.Println(rf.electionTimer)
