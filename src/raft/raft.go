@@ -17,13 +17,14 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 import "labrpc"
 
 // import "bytes"
 // import "labgob"
-
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -42,14 +43,36 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+const (
+	Follower  = "follower"
+	Candidate = "candidate"
+	Leader    = "leader"
+	Stopped   = "stopped"
+)
+
+
+
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
+	mu                sync.Mutex          // Lock to protect shared access to this peer's state
+	peers             []*labrpc.ClientEnd // RPC end points of all peers
+	persister         *Persister          // Object to hold this peer's persisted state
+	me                int                 // this peer's index into peers[]
+	state             string
+	eventCh           chan event
+	electionTimeoutCh chan struct{}
+
+	// Move these to LogEntry struct
+	//-------
+	log				  []Log
+	commitIndex       int
+	lastApplied       int
+	//---------
+
+	currentTerm  	  int
+	votedFor   		  int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -57,6 +80,40 @@ type Raft struct {
 
 }
 
+func (rf *Raft) SendEvents(event Event) {
+	rf.eventCh <- event
+}
+
+func (rf *Raft) getState() string {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	state := rf.state
+	return state
+}
+
+func (rf *Raft) setState(state string) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.state = state
+}
+
+func (rf *Raft) getCurrentTerm() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm
+}
+
+func (rf *Raft) getVotedFor() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.votedFor
+}
+
+func (rf *Raft) getLogs() []Log {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.log
+}
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -66,7 +123,6 @@ func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	return term, isleader
 }
-
 
 //
 // save Raft's persistent state to stable storage,
@@ -83,7 +139,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -107,15 +162,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -124,6 +180,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -131,6 +189,7 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.SendEvents(NewEvent(RequestVote, args, reply))
 }
 
 //
@@ -167,7 +226,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -188,7 +246,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -226,6 +283,117 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-
 	return rf
+}
+
+func (rf *Raft) eventLoop() {
+	state := rf.getState()
+	for state != Stopped {
+		switch state {
+
+		case Follower:
+			rf.HandleFollowerState()
+
+		case Candidate:
+			rf.HandleCandidateState()
+
+		case Leader:
+			rf.HandleLeaderState()
+
+		}
+		state = rf.getState()
+	}
+}
+
+func (rf *Raft) HandleCandidateState() {}
+
+func (rf *Raft) HandleLeaderState() {}
+
+func (rf *Raft) HandleFollowerState() {
+	for rf.getState() == Follower {
+		select {
+		case event := <-rf.eventCh:
+			switch event.eventType {
+			case AppendEntries:
+				rf.ProcessAppendEntries(event.req)
+			case RequestVote:
+				rf.ProcessRequestVote(event.req, event.res)
+			case StateChange:
+				rf.ProcessStateChange(event.req)
+			case ElectionTimeout:
+				rf.ProcessElectionTimeout()
+			}
+		}
+	}
+}
+
+func (rf *Raft) ProcessAppendEntries(request interface{}) {}
+
+func UpdateRequestVoteResponse(response *RequestVoteReply, followerTerm int, voteGranted bool) {
+	response.Term = followerTerm
+	response.VoteGranted = voteGranted
+}
+
+func (rf *Raft) ProcessRequestVote(request interface{}, response *RequestVoteReply) {
+	requestArgs := request.(RequestVoteArgs)
+	currentTerm := rf.getCurrentTerm()
+	votedFor := rf.getVotedFor()
+	logs := rf.getLogs()
+	followerLastLog := logs[len(logs)-1]
+
+	if requestArgs.Term < currentTerm {
+		UpdateRequestVoteResponse(response, currentTerm, false)
+		return
+	}
+
+	if len(logs) < 0 {
+		UpdateRequestVoteResponse(response, currentTerm, true)
+		return
+	}
+
+	if votedFor == 0 || votedFor == requestArgs.CandidateId {
+		if requestArgs.LastLogTerm >= followerLastLog.term {
+			if requestArgs.LastLogTerm == followerLastLog.term && requestArgs.LastLogIndex < len(logs)-1 {
+				UpdateRequestVoteResponse(response, currentTerm, false)
+				return
+			}
+			UpdateRequestVoteResponse(response, currentTerm, true)
+			return
+		} else {
+			UpdateRequestVoteResponse(response, currentTerm, false)
+			return
+		}
+	}else {
+		UpdateRequestVoteResponse(response, currentTerm, false)
+		return
+	}
+}
+
+func (rf *Raft) ProcessStateChange(newState interface{}) {
+	state := rf.getState()
+	if state == Leader {
+		// Stop heartbeats
+	}
+	if state == Follower {}
+	if state == Candidate{
+		// Stop election
+	}
+
+	rf.setState(newState.(string))
+}
+
+func (rf *Raft) ProcessElectionTimeout() {
+	rf.SendEvents(NewEvent(StateChange, Candidate, nil))
+}
+
+func (rf *Raft) StartElectionTimer(c chan bool) {
+	for {
+		select {
+		case <-time.After(time.Duration(getRandomTimeout())):
+			electionTimeoutEvent := NewEvent(ElectionTimeout, nil, nil)
+			rf.SendEvents(electionTimeoutEvent)
+		case <-c:
+			return
+		}
+	}
 }
