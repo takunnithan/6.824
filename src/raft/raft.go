@@ -63,6 +63,7 @@ type Raft struct {
 	state             string
 	eventCh           chan event
 	electionTimeoutCh chan struct{}
+	stop chan bool
 
 	// Move these to LogEntry struct
 	//-------
@@ -122,6 +123,12 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 	// Your code here (2A).
 	return term, isleader
+}
+
+func (rf *Raft) GetPeers() []*labrpc.ClientEnd {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.peers
 }
 
 //
@@ -221,8 +228,30 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, ch chan bool) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []Log
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.SendEvents(NewEvent(AppendEntries, args, reply))
+}
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -327,12 +356,47 @@ func (rf *Raft) HandleFollowerState() {
 	}
 }
 
-func (rf *Raft) ProcessAppendEntries(request interface{}) {}
+func UpdateAppendEntriesResponse(response *AppendEntriesReply, followerTerm int, Success bool) {
+	response.Term = followerTerm
+	response.Success = Success
+}
+
+func (rf *Raft) ProcessAppendEntries(request interface{}, response *AppendEntriesReply) {
+	requestArgs := request.(AppendEntriesArgs)
+	currentTerm := rf.getCurrentTerm()
+	logs := rf.getLogs()
+
+	if requestArgs.Term < currentTerm {
+		UpdateAppendEntriesResponse(response, currentTerm, false)
+		return
+	}
+	if len(logs)-1 < requestArgs.PrevLogIndex {
+		UpdateAppendEntriesResponse(response, currentTerm, false)
+		return
+	} else {
+		//PrevLogIndex is -1 because a newly elected leader may not have any logs
+		if requestArgs.PrevLogIndex != -1 {
+			if logs[requestArgs.PrevLogIndex].term != requestArgs.PrevLogTerm {
+				//rf.log = rf.log[:args.PrevLogIndex]
+				UpdateAppendEntriesResponse(response, currentTerm, false)
+				return
+			}
+		}
+	}
+	// HeartBeat
+	if len(requestArgs.Entries) == 0 {
+		rf.SendEvents(NewEvent(StateChange, Follower, nil))
+		UpdateAppendEntriesResponse(response, currentTerm, true)
+		return
+	}
+
+}
 
 func UpdateRequestVoteResponse(response *RequestVoteReply, followerTerm int, voteGranted bool) {
 	response.Term = followerTerm
 	response.VoteGranted = voteGranted
 }
+
 
 func (rf *Raft) ProcessRequestVote(request interface{}, response *RequestVoteReply) {
 	requestArgs := request.(RequestVoteArgs)
@@ -372,11 +436,20 @@ func (rf *Raft) ProcessRequestVote(request interface{}, response *RequestVoteRep
 func (rf *Raft) ProcessStateChange(newState interface{}) {
 	state := rf.getState()
 	if state == Leader {
-		// Stop heartbeats
+		rf.stop <- true
 	}
 	if state == Follower {}
 	if state == Candidate{
 		// Stop election
+	}
+
+	if newState == Follower || newState == Candidate{
+		rf.stop <- true
+		go rf.StartElectionTimer()
+	}
+
+	if newState == Candidate {
+		go rf.RunElection()
 	}
 
 	rf.setState(newState.(string))
@@ -386,14 +459,58 @@ func (rf *Raft) ProcessElectionTimeout() {
 	rf.SendEvents(NewEvent(StateChange, Candidate, nil))
 }
 
-func (rf *Raft) StartElectionTimer(c chan bool) {
+func (rf *Raft) StartElectionTimer() {
 	for {
 		select {
 		case <-time.After(time.Duration(getRandomTimeout())):
 			electionTimeoutEvent := NewEvent(ElectionTimeout, nil, nil)
 			rf.SendEvents(electionTimeoutEvent)
-		case <-c:
+		case <-rf.stop:
 			return
 		}
 	}
+}
+
+func (rf *Raft) RunElection() {
+	otherServers := rf.getOtherPeers()
+	voteGranted := 1
+	args := rf.getRequestVoteArgs()
+	var wg sync.WaitGroup
+	wg.Add(len(otherServers))
+	for _, server := range otherServers {
+		go func(rf *Raft, server int, args *RequestVoteArgs, voteGranted *int, wg *sync.WaitGroup) {
+			reply := &RequestVoteReply{}
+			ch := make(chan bool, 1)
+			// Continue from here ----------------------->>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>.
+			go rf.sendRequestVote(???, args, reply, ch)
+			select {
+			case res := <-ch:
+				if res {
+					if reply.VoteGranted {
+						*voteGranted = *voteGranted + 1
+					} else {
+						if reply.Term > electionTerm {
+							rf.currentTerm = reply.Term
+						}
+					}
+				}
+				wg.Done()
+
+			case <-time.After(1 * time.Millisecond):
+				wg.Done()
+				return
+			}
+		}(rf, server, args, &voteGranted, &wg)
+
+	}
+
+}
+
+func (rf *Raft) getOtherPeers() []*labrpc.ClientEnd{
+	peers := rf.GetPeers()
+	i := rf.me
+	peers[i] = peers[len(peers)-1]
+	peers[len(peers)-1] = nil
+	peers = peers[:len(peers)-1]
+	return peers
 }
