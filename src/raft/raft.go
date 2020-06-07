@@ -68,13 +68,14 @@ type Raft struct {
 
 	// Move these to LogEntry struct
 	//-------
-	log         []Log
-	commitIndex int
-	lastApplied int
+	log               []Log
+	commitIndex       int
+	lastApplied       int
 	//---------
 
-	currentTerm int
-	votedFor    int
+	currentTerm       int
+	votedFor          int
+	nextIndex         map[int]int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -148,6 +149,12 @@ func (rf *Raft) getLastLogTerm() int {
 	logs := rf.getLogs()
 	lastLogTerm := logs[len(logs)-1].term
 	return lastLogTerm
+}
+
+func (rf *Raft) getNextIndex(peerIndex int) int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.nextIndex[peerIndex]
 }
 
 //
@@ -279,10 +286,37 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.SendEvents(NewEvent(AppendEntries, args, reply))
 }
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+func (rf *Raft) sendAppendEntries(peerIndex int, args *AppendEntriesArgs, reply *AppendEntriesReply, ch chan bool)  {
+	ok := rf.peers[peerIndex].Call("Raft.AppendEntries", args, reply)
+	ch<-ok
+	return
 }
+
+func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, peerIndex int) AppendEntriesArgs {
+	// Using next index to get previousLogTerm & Index
+	previousLogIndex := -1
+	previousLogTerm := -1
+	nextIndex := rf.getNextIndex(peerIndex)
+	if nextIndex > 0 {
+		previousLogIndex = nextIndex - 1
+		previousLog := rf.getLogs()[previousLogIndex]
+		previousLogTerm = previousLog.getLogTerm()
+	}
+
+	var logEntries []Log
+	if !isHeartBeat {
+		logEntries = rf.log[nextIndex:]
+	}
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: previousLogIndex,
+		PrevLogTerm:  previousLogTerm,
+		Entries:      logEntries,
+		LeaderCommit: rf.commitIndex}
+	return args
+}
+
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -504,17 +538,18 @@ func (rf *Raft) StartElectionTimer() {
 }
 
 func (rf *Raft) RunElection() {
-	otherServers := rf.getOtherPeers()
+	otherPeers := rf.getOtherPeers()
 	voteGranted := 1
 	args := rf.getRequestVoteArgs()
 	electionTerm := rf.getCurrentTerm()
 	var wg sync.WaitGroup
-	wg.Add(len(otherServers))
-	for _, server := range otherServers {
-		go func(rf *Raft, server *labrpc.ClientEnd, args *RequestVoteArgs, voteGranted *int, wg *sync.WaitGroup) {
+	wg.Add(len(otherPeers))
+	for _, peerIndex := range otherPeers {
+		go func(rf *Raft, peerIndex int, args *RequestVoteArgs, voteGranted *int, wg *sync.WaitGroup) {
 			reply := &RequestVoteReply{}
 			ch := make(chan bool)
-			go rf.sendRequestVote(server, args, reply, ch)
+			peer := rf.GetPeers()[peerIndex]
+			go rf.sendRequestVote(peer, args, reply, ch)
 			select {
 			case res := <-ch:
 				if res == true {
@@ -531,7 +566,7 @@ func (rf *Raft) RunElection() {
 				wg.Done()
 				return
 			}
-		}(rf, server, &args, &voteGranted, &wg)
+		}(rf, peerIndex, &args, &voteGranted, &wg)
 	}
 
 	wg.Wait()
@@ -549,57 +584,47 @@ func (rf *Raft) RunElection() {
 
 }
 
-func (rf *Raft) getOtherPeers() []*labrpc.ClientEnd {
+func (rf *Raft) getOtherPeers() []int {
 	peers := rf.GetPeers()
-	i := rf.me
-	peers[i] = peers[len(peers)-1]
-	peers[len(peers)-1] = nil
-	peers = peers[:len(peers)-1]
-	return peers
+	var otherPeers []int
+	for index := range peers {
+		if index != rf.me {
+			otherPeers = append(otherPeers, index)
+		}
+	}
+	return otherPeers
 }
 
 func (rf *Raft) heartBeat(stop chan bool) {
 	ticker := time.NewTicker(time.Duration(HeartbeatTimeInterval) * time.Millisecond)
+	otherPeers := rf.getOtherPeers()
 	for {
 		select {
 		case <-ticker.C:
-			// send heartbeats
+			for _, peerIndex := range otherPeers {
+				reply := &AppendEntriesReply{}
+				go func(peerIndex int, reply *AppendEntriesReply) {
+					args := rf.getAppendEntriesArgs(true, server)
+					ch := make(chan bool)
+					rf.sendAppendEntries(peerIndex, &args, reply, ch)
+					select {
+					case res := <-ch:
+						if res {
+							if reply.Term > rf.currentTerm {
+								rf.SendEvents(NewEvent(StateChange, Follower, nil))
+								rf.setCurrentTerm(reply.Term)
+							}
+						}
+						return
+
+					case <-time.After(4 * time.Millisecond):
+						return
+					}
+				}(peerIndex, reply)
+			}
 		case <-stop:
 			ticker.Stop()
 			return
 		}
 	}
-	}
-		//Build a function to send out heartbeats to all peers
-//========================================================
-//	reply := &AppendEntriesReply{}
-//	for _, server := range rf.otherServers {
-//		rf.mu.Lock()
-//		args := rf.getAppendEntriesArgs(true, server)
-//		rf.mu.Unlock()
-//		go func(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-//			ch := make(chan bool, 1)
-//			rf.sendAppendEntries(server, args, reply, ch)
-//			select {
-//			case res := <-ch:
-//				if res {
-//					rf.mu.Lock() //---------->
-//					if reply.Term > rf.currentTerm {
-//						rf.currentTerm = reply.Term
-//						rf.state = FOLLOWER
-//					}
-//					rf.mu.Unlock() //---------->
-//					break
-//				}
-//
-//			case <-time.After(1 * time.Millisecond):
-//				return
-//			}
-//		}(server, args, reply)
-//	}
-//	time.Sleep(10 * time.Millisecond)
-//}
-//time.Sleep(2 * time.Microsecond)
-//}
-//}
-//============================================
+}
