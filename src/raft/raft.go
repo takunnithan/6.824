@@ -7,10 +7,10 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, Term, isleader)
 //   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
+// rf.GetState() (Term, isLeader)
+//   ask a Raft for its current Term, and whether it thinks it is leader
 // ApplyMsg
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
@@ -64,9 +64,8 @@ type Raft struct {
 	me                int                 // this peer's index into peers[]
 	state             string
 	eventCh           chan Event
-	electionTimeoutCh chan struct{}
-	stop              chan bool
-	stopHeartbeat	  chan bool   //-------> use struct{}
+	stopHeartbeat	  chan struct{}
+	stopElectionCh	  chan struct{}
 
 	// Move these to LogEntry struct
 	//-------
@@ -153,7 +152,7 @@ func (rf *Raft) getLastLogTerm() int {
 	if len(logs) == 0 {
 		return -1
 	}
-	lastLogTerm := logs[len(logs)-1].term
+	lastLogTerm := logs[len(logs)-1].Term
 	return lastLogTerm
 }
 
@@ -253,8 +252,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	followerLastLog := logs[len(logs)-1]
 	if votedFor == 0 || votedFor == args.CandidateId {
-		if args.LastLogTerm >= followerLastLog.term {
-			if args.LastLogTerm == followerLastLog.term && args.LastLogIndex < len(logs)-1 {
+		if args.LastLogTerm >= followerLastLog.Term {
+			if args.LastLogTerm == followerLastLog.Term && args.LastLogIndex < len(logs)-1 {
 				UpdateRequestVoteResponse(reply, currentTerm, false)
 				return
 			}
@@ -321,7 +320,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	currentTerm := rf.getCurrentTerm()
 	logs := rf.getLogs()
-
+	fmt.Println(args)
 	if args.Term < currentTerm {
 		UpdateAppendEntriesResponse(reply, currentTerm, false)
 		return
@@ -332,7 +331,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		//PrevLogIndex is -1 because a newly elected leader may not have any logs
 		if args.PrevLogIndex != -1 {
-			if logs[args.PrevLogIndex].term != args.PrevLogTerm {
+			if logs[args.PrevLogIndex].Term != args.PrevLogTerm {
 				//rf.log = rf.log[:args.PrevLogIndex]
 				UpdateAppendEntriesResponse(reply, currentTerm, false)
 				return
@@ -352,7 +351,7 @@ func (rf *Raft) sendAppendEntries(peerIndex int, args *AppendEntriesArgs, reply 
 	return
 }
 
-func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, peerIndex int) AppendEntriesArgs {
+func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, peerIndex int) *AppendEntriesArgs {
 	// Using next index to get previousLogTerm & Index
 	previousLogIndex := -1
 	previousLogTerm := -1
@@ -360,14 +359,14 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, peerIndex int) AppendEntr
 	if nextIndex > 0 {
 		previousLogIndex = nextIndex - 1
 		previousLog := rf.getLogs()[previousLogIndex]
-		previousLogTerm = previousLog.getLogTerm()
+		previousLogTerm = previousLog.Term
 	}
 
 	var logEntries []Log
 	if !isHeartBeat {
 		logEntries = rf.log[nextIndex:]
 	}
-	args := AppendEntriesArgs{
+	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: previousLogIndex,
@@ -389,7 +388,7 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, peerIndex int) AppendEntr
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
+// Term. the third return value is true if this server believes it is
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -432,9 +431,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.eventCh = make(chan Event)
-	rf.electionTimeoutCh = make(chan struct{})
-	rf.stop = make(chan bool)
-	rf.stopHeartbeat = make(chan bool)
+	rf.stopHeartbeat = make(chan struct{})
 	rf.nextIndex = make(map[int]int)
 	rf.currentTerm = -1
 	rf.commitIndex =-1
@@ -471,9 +468,52 @@ func (rf *Raft) eventLoop() {
 	}
 }
 
-func (rf *Raft) HandleCandidateState() {}
+func (rf *Raft) HandleCandidateState() {
+	for {
+		select {
+		case event := <-rf.eventCh:
+			switch event.eventType {
+			case StateChange:
+				rf.ProcessStateChange(event.req)
+				return
+			}
+		}
+	}
+}
 
-func (rf *Raft) HandleLeaderState() {}
+func (rf *Raft) HandleLeaderState() {
+	for {
+		select {
+		case event := <-rf.eventCh:
+			switch event.eventType {
+			case StateChange:
+				rf.ProcessStateChange(event.req)
+				return
+			}
+		}
+	}
+}
+
+
+
+
+
+
+// May be sending every state change via event loop is a bad idea!!!
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 func (rf *Raft) HandleFollowerState() {
 	for {
@@ -503,20 +543,18 @@ func UpdateRequestVoteResponse(response *RequestVoteReply, followerTerm int, vot
 	response.VoteGranted = voteGranted
 }
 
-func (rf *Raft) ProcessRequestVote(request interface{}, response *RequestVoteReply) {
-
-}
 
 func (rf *Raft) ProcessStateChange(req interface{}) {
 	state := rf.getState()
 	newState := req.(string)
 	if state == Leader {
-		rf.stopHeartbeat <- true
+		rf.stopHeartbeat <- struct{}{}
 	}
 	if state == Follower {
 	}
 	if state == Candidate {
 		// Stop election
+		//rf.stopElectionCh <- struct{}{}
 	}
 
 	if newState == Follower || newState == Candidate {
@@ -545,6 +583,8 @@ func (rf *Raft) StartElectionTimer() {
 	select {
 	case <-time.After(time.Duration(getRandomTimeout()) * time.Millisecond):
 		go rf.SendEvents(NewEvent(ElectionTimeout, nil, nil))
+	case <-rf.stopElectionCh:
+		return
 	}
 }
 
@@ -577,7 +617,7 @@ func (rf *Raft) RunElection() {
 					}
 				}
 				wg.Done()
-			case <-time.After(1 * time.Millisecond):
+			case <-time.After(2 * time.Millisecond):
 				wg.Done()
 				return
 			}
@@ -610,36 +650,41 @@ func (rf *Raft) getOtherPeers() []int {
 }
 
 func (rf *Raft) heartBeat() {
-	ticker := time.NewTicker(time.Duration(HeartbeatTimeInterval) * time.Millisecond)
 	otherPeers := rf.getOtherPeers()
-	fmt.Printf("Raft Peer: %d, ----Sending HeartBeats", rf.me)
+	rf.sendHeartBeat(otherPeers)
+	ticker := time.NewTicker(time.Duration(HeartbeatTimeInterval) * time.Millisecond)
 	for {
 		select {
 		case <-ticker.C:
-			for _, peerIndex := range otherPeers {
-				reply := &AppendEntriesReply{}
-				go func(peerIndex int, reply *AppendEntriesReply) {
-					args := rf.getAppendEntriesArgs(true, peerIndex)
-					ch := make(chan bool)
-					rf.sendAppendEntries(peerIndex, &args, reply, ch)
-					select {
-					case res := <-ch:
-						if res {
-							if reply.Term > rf.currentTerm {
-								rf.SendEvents(NewEvent(StateChange, Follower, nil))
-								rf.setCurrentTerm(reply.Term)
-							}
-						}
-						return
-
-					case <-time.After(4 * time.Millisecond):
-						return
-					}
-				}(peerIndex, reply)
-			}
+			rf.sendHeartBeat(otherPeers)
 		case <-rf.stopHeartbeat:
 			ticker.Stop()
 			return
 		}
+	}
+}
+
+func (rf *Raft) sendHeartBeat(otherPeers []int) {
+	fmt.Printf("Raft Peer: %d, ----Sending HeartBeats", rf.me)
+	for _, peerIndex := range otherPeers {
+		reply := &AppendEntriesReply{}
+		go func(peerIndex int, reply *AppendEntriesReply) {
+			args := rf.getAppendEntriesArgs(true, peerIndex)
+			ch := make(chan bool)
+			go rf.sendAppendEntries(peerIndex, args, reply, ch)
+			select {
+			case res := <-ch:
+				if res {
+					if reply.Term > rf.currentTerm {
+						rf.SendEvents(NewEvent(StateChange, Follower, nil))
+						rf.setCurrentTerm(reply.Term)
+					}
+				}
+				return
+
+			case <-time.After(2 * time.Millisecond):
+				return
+			}
+		}(peerIndex, reply)
 	}
 }
