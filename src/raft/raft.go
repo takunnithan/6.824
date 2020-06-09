@@ -355,7 +355,8 @@ func (rf *Raft) getAppendEntriesArgs(isHeartBeat bool, peerIndex int) *AppendEnt
 	// Using next index to get previousLogTerm & Index
 	previousLogIndex := -1
 	previousLogTerm := -1
-	nextIndex := rf.getNextIndex(peerIndex)
+	nextIndex := rf.getNextIndex(peerIndex)   ///----> This will fail initially -->
+	// On winning the election leader should initialize the nextIndex for all peers to
 	if nextIndex > 0 {
 		previousLogIndex = nextIndex - 1
 		previousLog := rf.getLogs()[previousLogIndex]
@@ -570,6 +571,12 @@ func (rf *Raft) ProcessStateChange(req interface{}) {
 		fmt.Println("I am LEADERERRR")
 		// Start sending out heartbeats
 		go rf.heartBeat()
+
+		// Read the paper again
+
+		// >>>>>>  Set nextIndex for all peers to last long index of server + 1
+
+
 	}
 
 	rf.setState(newState)
@@ -619,6 +626,7 @@ func (rf *Raft) RunElection() {
 				wg.Done()
 			case <-time.After(2 * time.Millisecond):
 				wg.Done()
+				// CLOSE the `ch` channel -> ??
 				return
 			}
 		}(rf, peerIndex, &args, &voteGranted, &wg)
