@@ -64,8 +64,8 @@ type Raft struct {
 	me                int                 // this peer's index into peers[]
 	state             string
 	eventCh           chan Event
-	stopHeartbeat	  chan struct{}
-	stopElectionCh	  chan struct{}
+	stopHeartbeat     chan struct{}
+	stopElectionTimer chan struct{}
 
 	// Move these to LogEntry struct
 	//-------
@@ -257,6 +257,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				UpdateRequestVoteResponse(reply, currentTerm, false)
 				return
 			}
+			rf.setCurrentTerm(args.Term)
 			UpdateRequestVoteResponse(reply, currentTerm, true)
 			return
 		} else {
@@ -338,6 +339,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
+
+	rf.setCurrentTerm(args.Term)			// IMP
+
 	// HeartBeat
 	if len(args.Entries) == 0 {
 		rf.SendEvents(NewEvent(StateChange, Follower, nil))
@@ -410,6 +414,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+
 }
 
 //
@@ -552,10 +557,13 @@ func (rf *Raft) ProcessStateChange(req interface{}) {
 		rf.stopHeartbeat <- struct{}{}
 	}
 	if state == Follower {
+
+		// How to send to a closed channel and handle errors ???????
+		rf.stopElectionTimer <- struct{}{}
 	}
 	if state == Candidate {
 		// Stop election
-		//rf.stopElectionCh <- struct{}{}
+		//rf.stopElectionTimer <- struct{}{}
 	}
 
 	if newState == Follower || newState == Candidate {
@@ -587,10 +595,12 @@ func (rf *Raft) ProcessElectionTimeout() {
 }
 
 func (rf *Raft) StartElectionTimer() {
+	rf.stopElectionTimer = make(chan struct{}, 1)
 	select {
 	case <-time.After(time.Duration(getRandomTimeout()) * time.Millisecond):
 		go rf.SendEvents(NewEvent(ElectionTimeout, nil, nil))
-	case <-rf.stopElectionCh:
+		//close(rf.stopElectionTimer)
+	case <-rf.stopElectionTimer:
 		return
 	}
 }
@@ -636,11 +646,13 @@ func (rf *Raft) RunElection() {
 	majority := GetMajority(len(rf.peers))
 	//rfElectionTimer := rf.electionTimer
 	//if rfElectionTimer > 0 {	-- If election timeout before election completion
-	//if rfCurrentTerm == electionTerm {  -- If currentTerm changes during election
+	if rf.getCurrentTerm() != electionTerm {  // If currentTerm changes during election
+		return
+	}
 	//- Ideally election should stop if someone else becomes a leader
 	if voteGranted >= majority {
-		fmt.Println("I AM THE LEADER", rf.me, "majority: ", majority, "Votes: ", voteGranted)
 		go rf.SendEvents(NewEvent(StateChange, Leader, nil))
+		fmt.Println("I AM THE LEADER", rf.me, "majority: ", majority, "Votes: ", voteGranted)
 		//rf.setCurrentTerm(rfCurrentTerm)
 	}
 
@@ -673,7 +685,7 @@ func (rf *Raft) heartBeat() {
 }
 
 func (rf *Raft) sendHeartBeat(otherPeers []int) {
-	fmt.Printf("Raft Peer: %d, ----Sending HeartBeats", rf.me)
+	fmt.Printf("Raft Peer: %d, ----Sending HeartBeats\t", rf.me)
 	for _, peerIndex := range otherPeers {
 		reply := &AppendEntriesReply{}
 		go func(peerIndex int, reply *AppendEntriesReply) {
@@ -684,8 +696,8 @@ func (rf *Raft) sendHeartBeat(otherPeers []int) {
 			case res := <-ch:
 				if res {
 					if reply.Term > rf.currentTerm {
-						rf.SendEvents(NewEvent(StateChange, Follower, nil))
 						rf.setCurrentTerm(reply.Term)
+						go rf.SendEvents(NewEvent(StateChange, Follower, nil))
 					}
 				}
 				return

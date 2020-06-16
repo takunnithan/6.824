@@ -19,7 +19,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 func getRandomTimeout() int {
 	rand.Seed(time.Now().UnixNano())
-	return rand.Intn(150) + 150
+	return rand.Intn(150) + 200
 }
 
 func GetMajority(noOfServers int) int {
